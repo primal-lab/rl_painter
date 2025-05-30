@@ -1,0 +1,14 @@
+gym
+numpy
+torch
+opencv-python
+matplotlib
+scikit-image 
+tqdm  
+imageio 
+torchvision
+pillow
+torchsummary
+lpips
+git+https://github.com/openai/CLIP.git
+

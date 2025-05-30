@@ -1,0 +1,35 @@
+!.gitignore
+
+# Ignore everything
+*
+
+# But keep rl_art-1-main2/ folder
+!rl_art-1-main2/
+!rl_art-1-main2/**
+
+# Inside rl_art-1-main2/ folder, ignore - 
+
+# Ignore all __pycache__ folders everywhere
+**/__pycache__/
+
+# Ignore files in rl_art-1-main2
+rl_art-1-main2/project_directory_notes.txt
+rl_art-1-main2/pdb_test.py
+rl_art-1-main2/img_to_vid.py
+
+# Ignore any .mp4 files
+rl_art-1-main2/**/*.mp4
+
+# Ignore folders inside deep_rl_painter
+rl_art-1-main2/deep_rl_painter/logs/
+rl_art-1-main2/deep_rl_painter/step_outputs/
+
+# Ignore files inside deep_rl_painter
+rl_art-1-main2/deep_rl_painter/train.log
+rl_art-1-main2/deep_rl_painter/target.jpg
+rl_art-1-main2/deep_rl_painter/profiler_test.py
+rl_art-1-main2/deep_rl_painter/env/environment_old.py
+
+# Ignore Mac system files
+.DS_Store
+

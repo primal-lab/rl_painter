@@ -1,0 +1,22 @@
+| Model Name      | Output Size (224x224 input) | Notes                                                                   |
+| --------------- | --------------------------- | ----------------------------------------------------------------------- |
+| ResNet18        | (512, 7, 7)                 | After the final average pooling layer.                                  |
+| ResNet34        | (512, 7, 7)                 | After the final average pooling layer.                                  |
+| ResNet50        | (2048, 7, 7)                | After the final average pooling layer.                                  |
+| ResNet101       | (2048, 7, 7)                | After the final average pooling layer.                                  |
+| ResNet152       | (2048, 7, 7)                | After the final average pooling layer.                                  |
+| EfficientNet-B0 | (1280, 7, 7)                | After the final convolutional and pooling layers.                       |
+| EfficientNet-B1 | (1280, 7, 7)                | After the final convolutional and pooling layers.                       |
+| EfficientNet-B2 | (1408, 7, 7)                | After the final convolutional and pooling layers.                       |
+| EfficientNet-B3 | (1536, 7, 7)                | After the final convolutional and pooling layers.                       |
+| EfficientNet-B4 | (1792, 7, 7)                | After the final convolutional and pooling layers.                       |
+| EfficientNet-B5 | (2048, 7, 7)                | After the final convolutional and pooling layers.                       |
+| EfficientNet-B6 | (2304, 7, 7)                | After the final convolutional and pooling layers.                       |
+| EfficientNet-B7 | (2560, 7, 7)                | After the final convolutional and pooling layers.                       |
+| VGG11           | (512, 7, 7)                 | After the final pooling layer.                                          |
+| VGG13           | (512, 7, 7)                 | After the final pooling layer.                                          |
+| VGG16           | (512, 7, 7)                 | After the final pooling layer.                                          |
+| VGG19           | (512, 7, 7)                 | After the final pooling layer.                                          |
+| InceptionV3     | 2048                        | After the final average pooling and dropout layers.                     |
+| ConvNeXt-tiny   | (768, 7, 7)                 | After the final global average pooling layer.                           |
+| CustomEncoder   | 1024                        | After the flatten and fully connected layers, based on your definition. |
