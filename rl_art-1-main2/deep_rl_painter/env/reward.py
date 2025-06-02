@@ -95,7 +95,10 @@ def get_latent_representation(image, device):
         if len(image.shape) == 4:
             image = image[0]
         #!image = preprocess(transforms.ToPILImage()(image)).unsqueeze(0).to(device)
-        image = preprocess(transforms.ToPILImage()(image.cpu())).unsqueeze(0).to(device)
+        #image = preprocess(transforms.ToPILImage()(image.cpu())).unsqueeze(0).to(device)
+        image = image.detach().cpu() if image.is_cuda else image
+        image = preprocess(transforms.ToPILImage()(image)).unsqueeze(0).to(device)
+
     except Exception as e:
         print(f"Error in preprocessing: {e}")
         print("Image shape:", image.shape)

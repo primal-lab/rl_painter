@@ -46,6 +46,13 @@ class DDPGAgent:
         self.episode = 0
         self.step = 0
 
+        # move networks to GPU
+        self.actor = actor.to(self.device)
+        self.critic = critic.to(self.device)
+        self.actor_target = actor_target.to(self.device)
+        self.critic_target = critic_target.to(self.device)
+
+
     def select_action(self, canvas, target_image, prev_action):
         """
         Select an action from the actor network given the current state.
@@ -94,9 +101,9 @@ class DDPGAgent:
         Select an action and apply Ornstein-Uhlenbeck exploration noise.
         Used in train.py
         Args:
-            canvas (np.ndarray): Current canvas. Dimensions: (H, W, C)
-            target_image (np.ndarray): Target image. Dimensions: (H, W, C)
-            prev_action (np.ndarray): Action previously applied to canvas. Dimensions: (batch,action_dim)
+            canvas (torch.tensor): Current canvas. Dimensions: (B, H, W, C)
+            target_image (torch.tensor): Target image. Dimensions: (B, H, W, C)
+            prev_action (np.ndarray): Action previously applied to canvas. Dimensions: (6,)
             noise_scale (float): Scale of the noise to be added. 
         Used to control exploration.
 
@@ -133,6 +140,7 @@ class DDPGAgent:
         """
         os.makedirs("logs/model", exist_ok=True)
 
+        # skip training if RB doesn't have atleast 32 samples
         if len(self.replay_buffer) < self.config["batch_size"]:
             return
 
@@ -145,21 +153,29 @@ class DDPGAgent:
         #with open("logs/model/batch_shapes.log", "a") as f:
          #   f.write(f"Canvas: {canvas.shape}, PrevActions: {prev_actions.shape}, Actions: {actions.shape}, NextCanvas: {next_canvas.shape}\n")
 
-        print("(in ddpg.py Original canvas shape:", canvas.shape)
+        # print("(in ddpg.py Original canvas shape:", canvas.shape)
 
-        canvas = torch.tensor(canvas, dtype=torch.float32).to(device)
+        """canvas = torch.tensor(canvas, dtype=torch.float32).to(device)
         target = torch.tensor(target_image, dtype=torch.float32).to(device).repeat(canvas.shape[0], 1, 1, 1)
         prev_actions = torch.tensor(prev_actions, dtype=torch.float32).to(device)
         actions = torch.tensor(actions, dtype=torch.float32).to(device)
         next_canvas = torch.tensor(next_canvas, dtype=torch.float32).to(device)
         rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
-        dones = torch.tensor(dones, dtype=torch.float32).to(device)
+        dones = torch.tensor(dones, dtype=torch.float32).to(device)"""
 
-        print("🟨 DEBUG BATCH SHAPES BEFORE ACTOR CALL")
+        # canvas, prev_actions, actions, next_canvas, rewards, dones are already on GPU
+        if isinstance(target_image, np.ndarray):
+            target = torch.from_numpy(target_image).float().to(self.device)
+        else:
+            target = target_image.to(self.device)
+
+        target = target.repeat(canvas.shape[0], 1, 1, 1)
+
+        """print("🟨 DEBUG BATCH SHAPES BEFORE ACTOR CALL")
         print("canvas shape:", canvas.shape) 
         print("next_canvas shape:", next_canvas.shape)              # Should be [B, 1, 224, 224]
         print("target shape:", target.shape)                        # Should be [B, 1, 224, 224]
-        #print("next_prev_actions shape:", next_prev_actions.shape)  # Should be [B, 6]
+        #print("next_prev_actions shape:", next_prev_actions.shape)  # Should be [B, 6]"""
 
         with torch.no_grad():
             next_prev_actions = actions
@@ -177,10 +193,10 @@ class DDPGAgent:
         critic_loss.backward()
         self.critic_optimizer.step()
 
-        print("🟨 DEBUG BATCH SHAPES BEFORE ACTOR (PREDICTED) CALL")
+        """print("🟨 DEBUG BATCH SHAPES BEFORE ACTOR (PREDICTED) CALL")
         print("canvas shape:", canvas.shape)
         print("target shape:", target.shape)
-        print("prev_actions shape:", prev_actions.shape)
+        print("prev_actions shape:", prev_actions.shape)"""
 
 
         predicted_actions = self.actor(canvas, target, prev_actions)

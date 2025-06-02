@@ -93,7 +93,8 @@ def train(config):
         critic.parameters(), lr=config["critic_lr"])
 
     # Initialize replay buffer and noise process
-    replay_buffer = ReplayBuffer(config["buffer_size"])
+    #replay_buffer = ReplayBuffer(config["buffer_size"])
+    replay_buffer = ReplayBuffer(capacity=config["replay_buffer_capacity"], device=config["device"])
     noise = OUNoise(config["action_dim"])
 
     # Build the DDPG agent
@@ -131,7 +132,7 @@ def train(config):
         for episode in range(config["episodes"]):
     # Main training loop
     #for episode in range(config["episodes"]):
-            canvas = env.reset() # canvas = (H, W, C) numpy array
+            canvas = env.reset() # canvas = (H, W, C) tensor
             # random initial point is set above in env.reset
             prev_action = np.zeros(config["action_dim"], dtype=np.float32)
             # Initialize previous action with current point
@@ -150,9 +151,15 @@ def train(config):
 
             # Episode step loop
             while not done:
-                if isinstance(canvas, np.ndarray) and canvas.ndim == 3:  # (H, W, C)
-                    canvas = np.transpose(canvas, (2, 0, 1))             # (C, H, W)
-                    canvas = canvas[np.newaxis, :, :, :]                # (B, C, H, W)
+                #print(f"in train.py- canvas shape 1: {canvas.shape}, type: {type(canvas)}")
+                if isinstance(canvas, np.ndarray) and canvas.ndim == 3:
+                    # NumPy: (H, W, C) → (C, H, W) → (1, C, H, W)
+                    canvas = np.transpose(canvas, (2, 0, 1))
+                    canvas = canvas[np.newaxis, :, :, :]
+                elif isinstance(canvas, torch.Tensor) and canvas.ndim == 3:
+                    # Torch: (H, W, C) → (C, H, W) → (1, C, H, W)
+                    canvas = canvas.permute(2, 0, 1).unsqueeze(0).contiguous()
+                #print(f"in train.py- canvas shape 2: {canvas.shape}, type: {type(canvas)}")
 
                 # Convert to tensor and move to device
                 # canvas_tensor = torch.from_numpy(canvas).float().to(config["device"])
@@ -162,7 +169,10 @@ def train(config):
                     canvas_tensor = canvas.float().to(config["device"])
                 
                 # Get action -> ddpg.py -> actor.py -> merge networks -> image encoder
-                # prev_action = (6,1)
+                # prev_action = (6,) -> later converted to tensor and (6,1) in select_action()
+                """print(f"in train.py- canvas_tensor shape: {canvas_tensor.shape}, type: {type(canvas_tensor)}")  # (1, C, H, W)
+                print(f"in train.py- target_image shape: {target_image.shape}, type: {type(target_image)}")      # (1, C, H, W)
+                print(f"in train.py- prev_action shape: {prev_action.shape}, type: {type(prev_action)}")         # (6,)"""
                 action = agent.act(canvas_tensor, target_image, prev_action, noise_scale)
 
                 # Logs action values per step
@@ -184,28 +194,30 @@ def train(config):
 
                 # next_canvas from env.step = (C, H, W)
                 # canvas_tensor = (B, C, H, W)
-                canvas_tensor = torch.from_numpy(next_canvas).unsqueeze(0).float().to(config["device"])
+                if isinstance(next_canvas, np.ndarray):
+                    canvas_tensor = torch.from_numpy(next_canvas).float().unsqueeze(0).to(config["device"])
+                else:
+                    canvas_tensor = next_canvas.float().unsqueeze(0).to(config["device"])
 
                 # Store experience in replay buffer
                 # replay_buffer.store(canvas, prev_action, action, next_canvas, reward, done)
-                def to_numpy(x):
-                    return x.detach().cpu().numpy() if torch.is_tensor(x) else x
+                # replay buffer store gpu tensors directly now
+                #def to_numpy(x):
+                #    return x.detach().cpu().numpy() if torch.is_tensor(x) else x
                 
                 # canvas = (B, C, H, W)
-                if isinstance(canvas, torch.Tensor):
-                    canvas = canvas.squeeze(0)  # (C, H, W)
-                elif isinstance(canvas, np.ndarray):
-                    canvas = np.squeeze(canvas, axis=0) # (C, H, W)
+                # canvas_for_buffer = (C, H, W) using this so that canvas sizes don't get messed up when doing canvas = next canvas
+                canvas_for_buffer = canvas.squeeze(0) if isinstance(canvas, torch.Tensor) else np.squeeze(canvas, axis=0)
 
-                # canvas = (C, H, W)
+                # canvas_for_buffer = (C, H, W)
                 # next_canvas = (C, H, W)
                 replay_buffer.store(
-                    to_numpy(canvas),
-                    to_numpy(prev_action),
-                    to_numpy(action),
-                    to_numpy(next_canvas),
-                    to_numpy(reward),
-                    to_numpy(done)
+                    canvas_for_buffer,
+                    prev_action,
+                    action,
+                    next_canvas,
+                    reward,
+                    done
                 )
 
                 # keep track of epiosde and step numbers for update actor/critic
@@ -221,6 +233,7 @@ def train(config):
 
                 # Move to next state
                 # canvas = (B, C, H, W)
+                # canvas_tensor = (B, C, H, W)
                 canvas = canvas_tensor
                 
                 # Save step frame every 50th stroke for select episodes

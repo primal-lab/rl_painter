@@ -27,7 +27,8 @@ config = {
     "model_name": "resnet18",                # check models/image_encoder.py for available models
     "actor_lr": 1e-5,           
     "critic_lr": 1e-4,
-    "buffer_size": 100000,
+    #"buffer_size": 100000, same thing as below
+    "replay_buffer_capacity": 100000,
 
     "batch_size": 32,                       # if training is unstable (reward jumps/loss spikes), =32
     "gamma": 0.99,

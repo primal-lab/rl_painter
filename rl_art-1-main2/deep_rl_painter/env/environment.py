@@ -23,7 +23,7 @@ from gym import spaces
 from .canvas import init_canvas, update_canvas
 from .reward import calculate_reward
 import pdb
-from typing import Tuple
+from typing import Tuple, Union
 
 
 class PaintingEnv(gym.Env):
@@ -46,7 +46,8 @@ class PaintingEnv(gym.Env):
         self.max_strokes = max_strokes
         self.target_image_path = target_image_path
         self.channels = canvas_channels
-        # target image is a numpy array of shape (H, W, C)
+        # target image is a numpy array of shape (H, W, C) - not anymore
+        # target image is a tensor now of shape (H, W, C)
         self.target_image = self.load_image()
         self.center = np.array([self.canvas_size[0], self.canvas_size[1]]) // 2
         self.radius = min(self.canvas_size[0], self.canvas_size[1]) // 2
@@ -59,7 +60,7 @@ class PaintingEnv(gym.Env):
         Initializes the environment.
         Sets up the canvas, current point (starting point) and used_strokes (number of strokes used).
         """
-        # cavas = (H, W, C)
+        # canvas = (H, W, C)
         if self.channels == 1:  # Grayscale canvas
             self.canvas = init_canvas(
                 (self.canvas_size[0], self.canvas_size[1], 1))
@@ -69,34 +70,35 @@ class PaintingEnv(gym.Env):
         self.current_point = self.random_circle_point()
         self.used_strokes = 0
 
-    def load_image(self):
+    def load_image(self) -> Union[np.ndarray, torch.Tensor]:
         """
-        Loads an image from the given path and resizes it to the canvas size.
-        Returns:
-            img (numpy.ndarray): Loaded and resized image. (H, W, C)
-        Raises:
-            FileNotFoundError: If the image file is not found.
-            ValueError: If the image format is not supported.
+        Loads an image from the given path, resizes it to the canvas size,
+        and returns it as a (H, W, C) torch.Tensor on GPU if self.device == 'cuda',
+        else as a NumPy array.
         """
         if not os.path.exists(self.target_image_path):
-            raise FileNotFoundError(
-                f"Image file {self.target_image_path} not found.")
-        if not self.target_image_path.lower().endswith(('.png', '.jpg', '.jpeg')):
-            raise ValueError(
-                f"Unsupported image format: {self.target_image_path}. Please use PNG or JPG.")
+            raise FileNotFoundError(f"Image file {self.target_image_path} not found.")
 
+        if not self.target_image_path.lower().endswith(('.png', '.jpg', '.jpeg')):
+            raise ValueError(f"Unsupported format: {self.target_image_path}. Use PNG or JPG.")
+
+        # Load + resize
         if self.channels == 1:
             img = cv2.imread(self.target_image_path, cv2.IMREAD_GRAYSCALE)
-            img = cv2.resize(
-                img, (self.canvas_size[1], self.canvas_size[0]), interpolation=cv2.INTER_AREA)
+            img = cv2.resize(img, (self.canvas_size[1], self.canvas_size[0]), interpolation=cv2.INTER_AREA)
             img = np.expand_dims(img, axis=-1)
         else:
             img = cv2.imread(self.target_image_path, cv2.IMREAD_COLOR)
-            img = cv2.resize(
-                img, (self.canvas_size[1], self.canvas_size[0]), interpolation=cv2.INTER_AREA)
+            img = cv2.resize(img, (self.canvas_size[1], self.canvas_size[0]), interpolation=cv2.INTER_AREA)
+
         img = img.astype(np.float32)
-        # print(f"Target Image shape: {img.shape}")   # (H, W, C)
-        return img
+
+        # Convert to torch.Tensor only if using GPU
+        if self.device == "cuda":
+            return torch.from_numpy(img).float().to(self.device)  # (H, W, C)
+
+        return img  # Fallback: NumPy array
+
 
     def random_circle_point(self):
         """
@@ -123,7 +125,7 @@ class PaintingEnv(gym.Env):
         os.makedirs("logs/env", exist_ok=True)
 
         # self.canvas = prev_canvas = (H, W, C)
-        prev_canvas = self.canvas.copy()
+        prev_canvas = self.canvas.clone()
 
         # Calculate direction and next point
         #unit_vector = action[:2] / (np.linalg.norm(action[:2]) + 1e-8)
@@ -183,9 +185,16 @@ class PaintingEnv(gym.Env):
         #    f.write(f"Stroke {self.used_strokes} | Reward: {reward.item()}\n")
 
         canvas_to_return = self.canvas # (H, W, C)
-        canvas_to_return = np.transpose(canvas_to_return, (2, 0, 1))  # (C, H, W)
+        #canvas_to_return = np.transpose(canvas_to_return, (2, 0, 1))  # (C, H, W)
+        if isinstance(canvas_to_return, torch.Tensor):
+            canvas_to_return = canvas_to_return.permute(2, 0, 1).contiguous()  # (C, H, W)
+        else:
+            canvas_to_return = np.transpose(canvas_to_return, (2, 0, 1))       # (C, H, W)
+
         # reward.item() gives a plain float value as expected by train.py instead of a tensor
-        return canvas_to_return, reward.item(), done
+        # return canvas_to_return, reward.item(), done
+        # replay_buffer.store() already handles conversion to tensor
+        return canvas_to_return, reward, done
 
 
     def reset(self):
