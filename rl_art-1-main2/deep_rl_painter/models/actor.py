@@ -19,7 +19,7 @@ class Actor(nn.Module):
                  pretrained: bool = True,
                  fine_tune_encoder: Optional[bool] = True,
                  fine_tune_encoder_2: Optional[bool] = True,
-                 actor_network_input: int = 6,  # 2 for x,y,r,g,b, width
+                 actor_network_input: int = 6,  # 2 for x,y and 6 for x,y,r,g,b, width
                  hidden_layers: list = [512, 256, 128, 64, 32],
                  use_custom_encoder: Optional[bool] = False,
                  use_custom_encoder_2: Optional[bool] = False,

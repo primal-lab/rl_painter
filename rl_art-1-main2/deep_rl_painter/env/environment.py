@@ -108,7 +108,7 @@ class PaintingEnv(gym.Env):
         """
         theta = np.random.uniform(0, 2 * np.pi)
         out = (self.center + self.radius *
-               np.array([np.cos(theta), np.sin(theta)])).astype(int)
+               np.array([np.cos(theta), np.sin(theta)])).astype(np.float32)
         return out # (x,y)
 
     def to_tensor(self, img):
@@ -137,6 +137,7 @@ class PaintingEnv(gym.Env):
         else:
             unit_vector = action[:2] / norm"""
         
+        # action is numpy here
         # Calculate direction and next point
         direction = action[:2]
         # Check for NaNs or near-zero norm 
@@ -153,10 +154,9 @@ class PaintingEnv(gym.Env):
         if np.any(np.isnan(unit_vector)):
             raise ValueError(f"unit_vector is NaN! Action: {action}, norm: {norm}")
 
-        next_point = (
-            int(self.center[0] + unit_vector[0] * self.radius),
-            int(self.center[1] + unit_vector[1] * self.radius)
-        )
+        next_point = np.array([
+            self.center[0] + unit_vector[0] * self.radius,
+            self.center[1] + unit_vector[1] * self.radius], dtype=np.float32)
 
         # self.canvas = (H, W, C)
         self.canvas = update_canvas(self.canvas, tuple(self.current_point), tuple(next_point))
@@ -194,7 +194,7 @@ class PaintingEnv(gym.Env):
         # reward.item() gives a plain float value as expected by train.py instead of a tensor
         # return canvas_to_return, reward.item(), done
         # replay_buffer.store() already handles conversion to tensor
-        return canvas_to_return, reward, done
+        return canvas_to_return, reward, done, next_point
 
 
     def reset(self):

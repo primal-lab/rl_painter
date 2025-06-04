@@ -61,10 +61,10 @@ class DDPGAgent:
         Args:
             canvas (tensor): Current canvas.
             target_image (tensor): Target image.
-            prev_action (np.ndarray): Action previously applied to canvas.
+            prev_action (np.ndarray): Action previously applied to canvas. 
 
         Returns:
-            action (np.ndarray): Next action predicted by actor network.
+            action (np.ndarray): Next action predicted by actor network. (6,)
         """
         os.makedirs("logs/model", exist_ok=True)
 
@@ -75,7 +75,7 @@ class DDPGAgent:
         if isinstance(prev_action, np.ndarray):
             prev_action = torch.from_numpy(prev_action).float() # convert to tensor
         if prev_action.ndim == 1:
-            prev_action = prev_action.unsqueeze(0)  # (6,) → (1, 6)
+            prev_action = prev_action.unsqueeze(0)  # (2,) → (1, 2)
         prev_action = prev_action.to(device)
 
         """print(f"When getting the action - ") 
@@ -103,7 +103,7 @@ class DDPGAgent:
         Args:
             canvas (torch.tensor): Current canvas. Dimensions: (B, H, W, C)
             target_image (torch.tensor): Target image. Dimensions: (B, H, W, C)
-            prev_action (np.ndarray): Action previously applied to canvas. Dimensions: (6,)
+            prev_action (np.ndarray): normalised (x,y).  Dimensions: (2,)
             noise_scale (float): Scale of the noise to be added. 
         Used to control exploration.
 
@@ -177,10 +177,21 @@ class DDPGAgent:
         print("target shape:", target.shape)                        # Should be [B, 1, 224, 224]
         #print("next_prev_actions shape:", next_prev_actions.shape)  # Should be [B, 6]"""
 
+        canvas_size = self.config["canvas_size"]  #[224, 224]
+        center = torch.tensor([canvas_size[1] // 2, canvas_size[0] // 2], device=self.device).float()
+        radius = min(canvas_size[0], canvas_size[1]) // 2
+
         with torch.no_grad():
-            next_prev_actions = actions
-            next_actions = self.actor_target(next_canvas, target, next_prev_actions)
-            critic_actions = torch.cat((next_prev_actions, next_actions), dim=1)
+            next_prev_actions = actions #2
+            next_actions = self.actor_target(next_canvas, target, next_prev_actions) # next actions = 6
+            
+            # normalising the x,y values of next_actions
+            direction = next_actions[:, :2]  # raw (x, y)
+            norm = direction.norm(p=2, dim=1, keepdim=True) + 1e-8
+            unit_vector = direction / norm
+            current_action_xy = unit_vector * radius + center  # [B, 2]
+
+            critic_actions = torch.cat((next_prev_actions, current_action_xy), dim=1) #2+2 = 4
             # target_Q = self.critic_target(next_canvas, target, next_prev_actions, next_actions) - not passing next_prev_action
             target_Q = self.critic_target(next_canvas, target, critic_actions)
             target_Q = rewards + self.config["gamma"] * target_Q * (1 - dones)
@@ -199,8 +210,15 @@ class DDPGAgent:
         print("prev_actions shape:", prev_actions.shape)"""
 
 
-        predicted_actions = self.actor(canvas, target, prev_actions)
-        predicted_actions = torch.cat((prev_actions, predicted_actions), dim=1)
+        predicted_actions = self.actor(canvas, target, prev_actions) # 6
+
+        # need to normalise again 
+        direction = predicted_actions[:, :2]  # raw (x, y)
+        norm = direction.norm(p=2, dim=1, keepdim=True) + 1e-8
+        unit_vector = direction / norm
+        pred_action_xy = unit_vector * radius + center  # [B, 2]
+
+        predicted_actions = torch.cat((prev_actions, pred_action_xy), dim=1) # 2+ 2 = 4
         # actor_loss = -self.critic(canvas, target, prev_actions, predicted_actions).mean()
         actor_loss = -self.critic(canvas, target, predicted_actions).mean()
 

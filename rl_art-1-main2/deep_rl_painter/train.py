@@ -59,25 +59,29 @@ def train(config):
     # Initialize Actor & Critic networks (main and target)
     actor = Actor(
         image_encoder_model=config["model_name"],
-        actor_network_input=config["action_dim"],
+        #actor_network_input=config["action_dim"],
+        actor_network_input=2, # x,y
         in_channels=config["canvas_channels"],
         out_neurons=config["action_dim"]
     )
     critic = Critic(
         image_encoder_model=config["model_name"],
-        actor_network_input=config["action_dim"]*2,
+        #actor_network_input=config["action_dim"]*2,
+        actor_network_input=4,
         in_channels=config["canvas_channels"],
         out_neurons=1
     )
     actor_target = Actor(
         image_encoder_model=config["model_name"],
-        actor_network_input=config["action_dim"],
+        #actor_network_input=config["action_dim"],
+        actor_network_input=2, # x,y
         out_neurons=config["action_dim"],
         in_channels=config["canvas_channels"]
     )
     critic_target = Critic(
         image_encoder_model=config["model_name"],
-        actor_network_input=config["action_dim"]*2,
+        #actor_network_input=config["action_dim"]*2,
+        actor_network_input=4,
         in_channels=config["canvas_channels"],
         out_neurons=1
     )
@@ -115,7 +119,7 @@ def train(config):
 
     scores_window = deque(maxlen=100) # keep track of last 100 episodes, more stable than 3 
 
-    scores = []
+    #scores = []
 
     # Exploration noise control
     noise_scale = config["initial_noise_scale"]
@@ -138,6 +142,9 @@ def train(config):
             # Initialize previous action with current point
             prev_action[0] = env.current_point[0]
             prev_action[1] = env.current_point[1]
+            # Send only (x, y) point to the Actor
+            prev_point = prev_action[:2].copy()
+            first_step = True  # Flag to check for first loop
 
             # Logs input tensor shapes at the start of each episode
             """with open("logs/input_shapes.log", "a") as f:
@@ -167,13 +174,29 @@ def train(config):
                     canvas_tensor = torch.from_numpy(canvas).float().to(config["device"])
                 else:
                     canvas_tensor = canvas.float().to(config["device"])
-                
+
+                # Prepare actor input from previous point
+                if first_step:
+                    actor_prev_input = prev_point  # already a point on circle (from env.current_point -> env.random_circle_point)
+                    first_step = False  # flip the flag
+                else: # to get x,y on the circle, instead of raw directional x,y
+                    direction = prev_action[:2]
+                    norm = np.linalg.norm(direction) + 1e-8
+                    unit_vector = direction / norm
+                    actor_prev_input = np.array([
+                        env.center[0] + unit_vector[0] * env.radius,
+                        env.center[1] + unit_vector[1] * env.radius], dtype=np.float32)
+
+                #print(f"Prev Action: {prev_action}")
+                #print(f"Actor Prev Input : {actor_prev_input}")
+
                 # Get action -> ddpg.py -> actor.py -> merge networks -> image encoder
                 # prev_action = (6,) -> later converted to tensor and (6,1) in select_action()
-                """print(f"in train.py- canvas_tensor shape: {canvas_tensor.shape}, type: {type(canvas_tensor)}")  # (1, C, H, W)
-                print(f"in train.py- target_image shape: {target_image.shape}, type: {type(target_image)}")      # (1, C, H, W)
-                print(f"in train.py- prev_action shape: {prev_action.shape}, type: {type(prev_action)}")         # (6,)"""
-                action = agent.act(canvas_tensor, target_image, prev_action, noise_scale)
+                #action = agent.act(canvas_tensor, target_image, prev_action, noise_scale)
+                
+                # actor_prev_input = (2,) -> later converted to tensor and (2,1) in select_action()
+                # action is here numpy array (6,)
+                action = agent.act(canvas_tensor, target_image, actor_prev_input, noise_scale)
 
                 # Logs action values per step
                 """with open("logs/action_logs.csv", "a", newline="") as file:
@@ -183,7 +206,10 @@ def train(config):
                     writer.writerow([episode + 1, env.used_strokes, action.tolist()])"""
 
                 # Apply action in the environment
-                next_canvas, reward, done = env.step(action)
+                # actor_current_input contains the current action's normalised x,y values
+                next_canvas, reward, done, actor_current_input = env.step(action)
+                #print(f"Action: {action}")
+                #print(f"Actor Current Input (x, y): {actor_current_input}")
 
                 # Logs environment transitions including shapes and rewards
                 """with open("logs/env_transitions.log", "a") as f:
@@ -211,14 +237,26 @@ def train(config):
 
                 # canvas_for_buffer = (C, H, W)
                 # next_canvas = (C, H, W)
+                actor_prev_input = np.round(actor_prev_input, 6).astype(np.float32)
+                actor_current_input = np.round(actor_current_input, 6).astype(np.float32)
                 replay_buffer.store(
                     canvas_for_buffer,
-                    prev_action,
-                    action,
+                    #prev_action,
+                    actor_prev_input,
+                    #action,
+                    actor_current_input,
                     next_canvas,
                     reward,
                     done
                 )
+
+                """print(
+                f"[ReplayBuffer Store] canvas.shape={canvas_for_buffer.shape}, "
+                f"prev_action=({actor_prev_input[0]:.2f}, {actor_prev_input[1]:.2f}), "
+                f"action=({actor_current_input[0]:.2f}, {actor_current_input[1]:.2f}), "
+                f"next_canvas.shape={next_canvas.shape}, "
+                f"reward={reward:.4f}, done={done}"
+                )"""
 
                 # keep track of epiosde and step numbers for update actor/critic
                 agent.episode = episode + 1
@@ -237,13 +275,24 @@ def train(config):
                 canvas = canvas_tensor
                 
                 # Save step frame every 50th stroke for select episodes
-                if (episode + 1) in [1, 1000, 10000, 25000, 50000] and env.used_strokes % config["save_every_step"] == 0:
+                if (episode + 1) in [1, 2, 50, 100, 50000] and env.used_strokes % config["save_every_step"] == 0:
                     step_dir = f"step_outputs/episode_{episode + 1}"
                     os.makedirs(step_dir, exist_ok=True)
                     # sample path: step_outputs/episode_25000/episode_25000_step_00150.png
                     save_path = os.path.join(step_dir, f"step_{env.used_strokes}.png")
-                    #save_canvas(canvas, save_path)
-                    cv2.imwrite(save_path, canvas.astype("uint8"))
+                    # canvas is (B, C, H, W)
+                    """img_tensor = canvas[0].detach().cpu()  # Take the first image in the batch
+                    if img_tensor.shape[0] == 1:
+                        # Grayscale: (1, H, W) → (H, W)
+                        img_np = img_tensor.squeeze(0).numpy().astype("uint8")
+                    else:
+                        # RGB: (3, H, W) → (H, W, 3)
+                        img_np = img_tensor.permute(1, 2, 0).numpy().astype("uint8")
+                    cv2.imwrite(save_path, img_np)"""
+                    #cv2.imwrite(save_path, canvas.detach().cpu().numpy().astype("uint8"))
+                    canvas_to_save = canvas[0]  # (C, H, W)
+                    canvas_to_save = canvas_to_save.permute(1, 2, 0).contiguous()  # → (H, W, C)
+                    save_canvas(canvas_to_save, save_path)
                 prev_action = action
                 episode_reward += reward
 
@@ -258,14 +307,15 @@ def train(config):
 
             # Decay exploration noise
             noise_scale *= noise_decay
-            scores.append(episode_reward)
+            #scores.append(episode_reward) - not being used anywhere
             # Log episode reward
-            with open("logs/episode_rewards.csv", mode="a", newline="") as file:
+            """with open("logs/episode_rewards.csv", mode="a", newline="") as file:
                 writer = csv.writer(file)
                 if episode == 0:  # Write header only once
                     writer.writerow(["episode", "total_reward"])
-                writer.writerow([episode + 1, episode_reward])
+                writer.writerow([episode + 1, episode_reward])"""
             scores_window.append(episode_reward)
+            running_avg = torch.stack(list(scores_window)).mean()
 
             # Logs the running average reward over last 100 episodes
             """with open("logs/running_avg.csv", "a", newline="") as file:
@@ -276,7 +326,7 @@ def train(config):
 
             # Progress log
             print(
-                f"Episode {episode + 1} | Reward: {episode_reward} | Running Avg(100): {np.mean(scores_window)}")
+                f"Episode {episode + 1} | Reward: {episode_reward} | Running Avg(100): {running_avg.item():.2f}")
 
             # Save model checkpoints every 100 episodes
             if (episode + 1) % config["save_every_episode"] == 0:

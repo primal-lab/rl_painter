@@ -25,8 +25,8 @@ config = {
 
     # model parameters
     "model_name": "resnet18",                # check models/image_encoder.py for available models
-    "actor_lr": 1e-5,           
-    "critic_lr": 1e-4,
+    "actor_lr": 1e-6,           
+    "critic_lr": 1e-5,
     #"buffer_size": 100000, same thing as below
     "replay_buffer_capacity": 100000,
 

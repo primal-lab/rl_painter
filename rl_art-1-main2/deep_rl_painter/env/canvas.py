@@ -58,7 +58,7 @@ def update_canvas_torch(canvas: torch.Tensor,
                         width: int = 1,
                         channels: int = 1) -> torch.Tensor:
     """
-    Draws a line on a (C, H, W) canvas using Bresenham’s algorithm.
+    Draws a line on a (C, H, W) canvas using Bresenham’s algorithm (only works on integer grid coordinates)
     Returns modified canvas.
     """
     assert canvas.is_cuda
@@ -114,7 +114,7 @@ def update_canvas(canvas: Union[np.ndarray, torch.Tensor],
     if isinstance(canvas, torch.Tensor) and canvas.is_cuda:
         canvas_chw = canvas.permute(2, 0, 1).contiguous()  # (C, H, W)
         if color is None:
-            color = 1.0 if channels == 1 else (1.0, 1.0, 1.0)
+            color = 255.0 if channels == 1 else (255.0, 255.0, 255.0)
         updated = update_canvas_torch(canvas_chw, start_point, end_point, color, width, channels)
         return updated.permute(1, 2, 0).contiguous()  # back to (H, W, C)
 

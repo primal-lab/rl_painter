@@ -1,6 +1,7 @@
 import random
 import torch
 from collections import deque
+import os
 
 class ReplayBuffer:
     def __init__(self, capacity, device):
@@ -19,12 +20,23 @@ class ReplayBuffer:
 
         canvas = to_tensor(canvas)         # (C, H, W)
         next_canvas = to_tensor(next_canvas)  # (C, H, W)
-        prev_action = to_tensor(prev_action).view(-1)  # (6,)
-        action = to_tensor(action).view(-1)            # (6,)
+        prev_action = to_tensor(prev_action).view(-1)  # (2,)
+        action = to_tensor(action).view(-1)            # (2,)
         reward = to_tensor(reward).view(1)             # (1,)
         done = to_tensor(done).view(1)                 # (1,)
 
         self.buffer.append((canvas, prev_action, action, next_canvas, reward, done))
+
+        # logging
+        os.makedirs("logs/debug", exist_ok=True)
+        with open("logs/debug/replay_buffer.log", "a") as f:
+            f.write(
+                #f"[ReplayBuffer] canvas.shape={tuple(canvas.shape)}, "
+                f"prev_action=({prev_action[0].item():.6f}, {prev_action[1].item():.6f}), "
+                f"action=({action[0].item():.6f}, {action[1].item():.6f}), "
+                #f"next_canvas.shape={tuple(next_canvas.shape)}, "
+                f"reward={reward.item():.4f}, done={bool(done.item())}\n"
+            )
 
     def sample(self, batch_size):
         """
@@ -35,8 +47,8 @@ class ReplayBuffer:
 
         return (
             torch.stack(canvas),         # (B, C, H, W)
-            torch.stack(prev_actions),   # (B, 6)
-            torch.stack(actions),        # (B, 6)
+            torch.stack(prev_actions),   # (B, 2)
+            torch.stack(actions),        # (B, 2)
             torch.stack(next_canvas),    # (B, C, H, W)
             torch.stack(rewards),        # (B, 1)
             torch.stack(dones)           # (B, 1)
