@@ -15,8 +15,12 @@ import torch
 from torchvision import transforms
 from torch.nn.functional import cosine_similarity
 import clip
+import time
 
-
+global target_latent
+target_latent = None
+global model, preprocess
+model, preprocess = None, None
 def calculate_reward(prev_canvas, current_canvas, target_canvas, device):
     """
     Calculates the reward based on the chosen reward function.
@@ -29,14 +33,16 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device):
         torch.Tensor: The calculated reward (shape: [batch_size, 1]).
     """
     # Using CLIP for calculating cosine similarity
-
+    global target_latent
     #!latent1 = get_latent_representation(prev_canvas, device)
     #!latent2 = get_latent_representation(current_canvas, device)
     #!target_latent = get_latent_representation(target_canvas, device)
-
-    latent1 = get_latent_representation(prev_canvas.to(device), device)
-    latent2 = get_latent_representation(current_canvas.to(device), device)
-    target_latent = get_latent_representation(target_canvas.to(device), device)
+    #import pdb
+    #pdb.set_trace()
+    #latent1 = get_latent_representation(prev_canvas, device)
+    latent2 = get_latent_representation(current_canvas, device)
+    if target_latent is None:
+        target_latent = get_latent_representation(target_canvas, device)
 
     # Calculate cosine similarity
     # cosine_similarity_score_prev = calculate_cosine_similarity(
@@ -86,7 +92,13 @@ def get_latent_representation(image, device):
     """
 
     # Modify the model to output the features from the penultimate layer
-    model, preprocess = clip.load("ViT-B/32", device=device)
+    t0 = time.time()
+    global model, preprocess
+    if model is None:
+        model, preprocess = clip.load("ViT-B/32", device=device)
+    t1 = time.time()
+    total = t1-t0
+    print("Model Loading time: ", total)
     # This can be optimized further by removing some of the preprocessing steps
 
     if len(image.shape) == 4 and (image.shape[1] != 1 or image.shape[1] != 3):

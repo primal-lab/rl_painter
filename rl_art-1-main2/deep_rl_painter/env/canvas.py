@@ -61,25 +61,25 @@ def update_canvas_torch(canvas: torch.Tensor,
     Draws a line on a (C, H, W) canvas using Bresenham’s algorithm (only works on integer grid coordinates)
     Returns modified canvas.
     """
-    assert canvas.is_cuda
+    assert canvas.is_cuda # returns true if tensor is on gpu
     H, W = canvas.shape[-2:]
     device = canvas.device
 
     x0, y0 = int(start_point[0]), int(start_point[1])
     x1, y1 = int(end_point[0]), int(end_point[1])
 
-    dx = abs(x1 - x0)
+    dx = abs(x1 - x0) #absolute difference between x coordinates
     dy = abs(y1 - y0)
-    x, y = x0, y0
-    sx = 1 if x0 < x1 else -1
-    sy = 1 if y0 < y1 else -1
-    err = dx - dy
+    x, y = x0, y0 #initialise start point
+    sx = 1 if x0 < x1 else -1 # direction to move in x coordinate (left/right)
+    sy = 1 if y0 < y1 else -1 # (up/down)
+    err = dx - dy # how far off the current pixel is from the ideal line path
 
-    points = []
+    points = [] # collecting the (y, x) pixel coordinates the line will touch
     while True:
-        if 0 <= x < W and 0 <= y < H:
+        if 0 <= x < W and 0 <= y < H: #point is within canvas boundaries, add it to the list
             points.append((y, x))
-        if x == x1 and y == y1:
+        if x == x1 and y == y1: #stop the loop once we’ve reached the destination point
             break
         e2 = 2 * err
         if e2 > -dy:

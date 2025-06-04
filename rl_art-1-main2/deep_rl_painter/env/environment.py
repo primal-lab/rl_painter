@@ -24,7 +24,7 @@ from .canvas import init_canvas, update_canvas
 from .reward import calculate_reward
 import pdb
 from typing import Tuple, Union
-
+import time
 
 class PaintingEnv(gym.Env):
     def __init__(self, target_image_path: str, canvas_size: Tuple[int, int], canvas_channels: int, max_strokes: int, device: str):
@@ -159,7 +159,11 @@ class PaintingEnv(gym.Env):
             self.center[1] + unit_vector[1] * self.radius], dtype=np.float32)
 
         # self.canvas = (H, W, C)
+        t0 = time.time()
         self.canvas = update_canvas(self.canvas, tuple(self.current_point), tuple(next_point))
+        t1 = time.time()
+        total = t1-t0
+        #print("(in env.step) Rendering Time: ", total)
         self.used_strokes += 1
 
         # Log stroke movement from previous to next point
@@ -173,8 +177,11 @@ class PaintingEnv(gym.Env):
         target_tensor = self.to_tensor(self.target_image)
 
         # reward is a tensor here
+        t2 = time.time()
         reward = calculate_reward(prev_tensor, current_tensor, target_tensor, device=self.device)
-
+        t3 = time.time()
+        total1 = t3-t2
+        #print("in env.step = Reward:", total1)
         done = self.used_strokes >= self.max_strokes
         
         # the line below was used create the next state representation for the agent, to save in replay buffer 

@@ -31,6 +31,7 @@ from utils.replay_buffer import ReplayBuffer
 import cv2
 from env.canvas import save_canvas
 import torch.profiler
+import time
 
 
 def train(config):
@@ -156,24 +157,25 @@ def train(config):
             episode_reward = 0
             done = False
 
+            #print(f"in train.py- canvas shape 1: {canvas.shape}, type: {type(canvas)}")
+            if isinstance(canvas, np.ndarray) and canvas.ndim == 3:
+                # NumPy: (H, W, C) → (C, H, W) → (1, C, H, W)
+                canvas = np.transpose(canvas, (2, 0, 1))
+                canvas = canvas[np.newaxis, :, :, :]
+            elif isinstance(canvas, torch.Tensor) and canvas.ndim == 3:
+                # Torch: (H, W, C) → (C, H, W) → (1, C, H, W)
+                canvas = canvas.permute(2, 0, 1).unsqueeze(0).contiguous()
+            #print(f"in train.py- canvas shape 2: {canvas.shape}, type: {type(canvas)}")
+
+            # Convert to tensor and move to device
+            # canvas_tensor = torch.from_numpy(canvas).float().to(config["device"])
+            if isinstance(canvas, np.ndarray):
+                canvas_tensor = torch.from_numpy(canvas).float().to(config["device"])
+            else:
+                canvas_tensor = canvas.float().to(config["device"])
+
             # Episode step loop
             while not done:
-                #print(f"in train.py- canvas shape 1: {canvas.shape}, type: {type(canvas)}")
-                if isinstance(canvas, np.ndarray) and canvas.ndim == 3:
-                    # NumPy: (H, W, C) → (C, H, W) → (1, C, H, W)
-                    canvas = np.transpose(canvas, (2, 0, 1))
-                    canvas = canvas[np.newaxis, :, :, :]
-                elif isinstance(canvas, torch.Tensor) and canvas.ndim == 3:
-                    # Torch: (H, W, C) → (C, H, W) → (1, C, H, W)
-                    canvas = canvas.permute(2, 0, 1).unsqueeze(0).contiguous()
-                #print(f"in train.py- canvas shape 2: {canvas.shape}, type: {type(canvas)}")
-
-                # Convert to tensor and move to device
-                # canvas_tensor = torch.from_numpy(canvas).float().to(config["device"])
-                if isinstance(canvas, np.ndarray):
-                    canvas_tensor = torch.from_numpy(canvas).float().to(config["device"])
-                else:
-                    canvas_tensor = canvas.float().to(config["device"])
 
                 # Prepare actor input from previous point
                 if first_step:
@@ -196,7 +198,11 @@ def train(config):
                 
                 # actor_prev_input = (2,) -> later converted to tensor and (2,1) in select_action()
                 # action is here numpy array (6,)
+                t0 = time.time()
                 action = agent.act(canvas_tensor, target_image, actor_prev_input, noise_scale)
+                t1 = time.time()
+                total = t1-t0
+                print("Action Time: ", total)
 
                 # Logs action values per step
                 """with open("logs/action_logs.csv", "a", newline="") as file:
@@ -207,7 +213,11 @@ def train(config):
 
                 # Apply action in the environment
                 # actor_current_input contains the current action's normalised x,y values
+                t2 = time.time()
                 next_canvas, reward, done, actor_current_input = env.step(action)
+                t3 = time.time()
+                total1 = t3-t2
+                print("Rendering Time: ", total1)
                 #print(f"Action: {action}")
                 #print(f"Actor Current Input (x, y): {actor_current_input}")
 
