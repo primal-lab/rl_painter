@@ -21,14 +21,12 @@ import os
 import torch
 import numpy as np
 from collections import deque
-import csv
 from env.environment import PaintingEnv
 from models.actor import Actor
 from models.critic import Critic
 from models.ddpg import DDPGAgent
 from utils.noise import OUNoise
 from utils.replay_buffer import ReplayBuffer
-import cv2
 from env.canvas import save_canvas
 import torch.profiler
 import time
@@ -120,8 +118,6 @@ def train(config):
 
     scores_window = deque(maxlen=100) # keep track of last 100 episodes, more stable than 3 
 
-    #scores = []
-
     # Exploration noise control
     noise_scale = config["initial_noise_scale"]
     noise_decay = config["noise_decay"]
@@ -198,11 +194,11 @@ def train(config):
                 
                 # actor_prev_input = (2,) -> later converted to tensor and (2,1) in select_action()
                 # action is here numpy array (6,)
-                t0 = time.time()
+                # t0 = time.time()
                 action = agent.act(canvas_tensor, target_image, actor_prev_input, noise_scale)
-                t1 = time.time()
-                total = t1-t0
-                print("Action Time: ", total)
+                # t1 = time.time()
+                # total = t1-t0
+                # print("Action Time: ", total)
 
                 # Logs action values per step
                 """with open("logs/action_logs.csv", "a", newline="") as file:
@@ -213,12 +209,12 @@ def train(config):
 
                 # Apply action in the environment
                 # actor_current_input contains the current action's normalised x,y values
-                t2 = time.time()
+                # t2 = time.time()
                 next_canvas, reward, done, actor_current_input = env.step(action)
-                t3 = time.time()
-                total1 = t3-t2
-                print("Rendering Time: ", total1)
-                #print(f"Action: {action}")
+                # t3 = time.time()
+                # total1 = t3-t2
+                # print("Rendering Time: ", total1)
+                # #print(f"Action: {action}")
                 #print(f"Actor Current Input (x, y): {actor_current_input}")
 
                 # Logs environment transitions including shapes and rewards

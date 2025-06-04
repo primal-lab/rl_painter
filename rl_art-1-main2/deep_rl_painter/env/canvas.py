@@ -19,8 +19,6 @@ def init_canvas(image_shape: Tuple[int, int] | Tuple[int, int, int],
     Initializes a canvas on GPU in (H, W, C) format.
     Supports grayscale or RGB.
     """
-    #print(f"init_canvas: image_shape = {image_shape}, length = {len(image_shape)}")
-
     if len(image_shape) == 2:
         H, W = image_shape
         C = 1

@@ -66,4 +66,6 @@ config = {
     "log_level": "INFO",  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     "log_file": "training.log",
 
+    # profiling
+    "profile": False,  # whether to profile the training process
 }

@@ -17,11 +17,16 @@ from torch.nn.functional import cosine_similarity
 import clip
 import time
 
-global target_latent
-target_latent = None
-global model, preprocess
-model, preprocess = None, None
-def calculate_reward(prev_canvas, current_canvas, target_canvas, device):
+# target_latent
+TARGET_LATENT = None
+# model
+# preprocess
+CLIP_MODEL = None
+PREPROCESS = None
+# model, preprocess = None, None
+
+
+def calculate_reward(current_canvas, target_canvas, device):
     """
     Calculates the reward based on the chosen reward function.
 
@@ -33,34 +38,14 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device):
         torch.Tensor: The calculated reward (shape: [batch_size, 1]).
     """
     # Using CLIP for calculating cosine similarity
-    global target_latent
-    #!latent1 = get_latent_representation(prev_canvas, device)
-    #!latent2 = get_latent_representation(current_canvas, device)
-    #!target_latent = get_latent_representation(target_canvas, device)
-    #import pdb
-    #pdb.set_trace()
-    #latent1 = get_latent_representation(prev_canvas, device)
-    latent2 = get_latent_representation(current_canvas, device)
-    if target_latent is None:
-        target_latent = get_latent_representation(target_canvas, device)
+    global TARGET_LATENT
+    latent = get_latent_representation(current_canvas, device)
+    if TARGET_LATENT is None:
+        TARGET_LATENT = get_latent_representation(target_canvas, device)
 
-    # Calculate cosine similarity
-    # cosine_similarity_score_prev = calculate_cosine_similarity(
-    #     latent1, target_latent)
-
-    # cosine_similarity_score_current = calculate_cosine_similarity(
-    #     latent2, target_latent)
-
-    # cosine_similarity_reward = cosine_similarity_score_current - cosine_similarity_score_prev
-
-
-    mse_score_current = mse_loss(latent2, target_latent) # current_canvas - this mse needs to be lower
-    #mse_score_prev = mse_loss(latent1, target_latent) # prev_canvas
-    #mse_reward = mse_score_current - mse_score_prev
+    mse_score_current = mse_loss(latent, TARGET_LATENT) # current_canvas - this mse needs to be lower
     mse_reward = mse_score_current * 1000
 
-    #print("Reward tensor (before negation):", mse_reward) # reward
-    #print("Reward scalar (before negation):", mse_reward.item()) # reward.item()
     return -mse_reward  
 
 
@@ -75,7 +60,6 @@ def mse_loss(pred, target):
     Returns:
         torch.Tensor: The MSE loss value.
     """
-    #!return torch.mean((pred - target) ** 2)
     return torch.mean((pred.to(pred.device) - target.to(pred.device)) ** 2)
 
 def get_latent_representation(image, device):
@@ -92,24 +76,17 @@ def get_latent_representation(image, device):
     """
 
     # Modify the model to output the features from the penultimate layer
-    t0 = time.time()
-    global model, preprocess
-    if model is None:
-        model, preprocess = clip.load("ViT-B/32", device=device)
-    t1 = time.time()
-    total = t1-t0
-    print("Model Loading time: ", total)
-    # This can be optimized further by removing some of the preprocessing steps
+    global CLIP_MODEL, PREPROCESS
+    if CLIP_MODEL is None:
+        CLIP_MODEL, PREPROCESS = clip.load("ViT-B/32", device=device)
 
     if len(image.shape) == 4 and (image.shape[1] != 1 or image.shape[1] != 3):
         image = image.permute(0, 3, 1, 2)
     try:
         if len(image.shape) == 4:
             image = image[0]
-        #!image = preprocess(transforms.ToPILImage()(image)).unsqueeze(0).to(device)
-        #image = preprocess(transforms.ToPILImage()(image.cpu())).unsqueeze(0).to(device)
         image = image.detach().cpu() if image.is_cuda else image
-        image = preprocess(transforms.ToPILImage()(image)).unsqueeze(0).to(device)
+        image = PREPROCESS(transforms.ToPILImage()(image)).unsqueeze(0).to(device)
 
     except Exception as e:
         print(f"Error in preprocessing: {e}")
@@ -117,7 +94,7 @@ def get_latent_representation(image, device):
         return None
 
     with torch.no_grad():
-        latent_representation = model.encode_image(image)
+        latent_representation = CLIP_MODEL.encode_image(image)
         latent_representation = torch.flatten(
             latent_representation, 1)  # Flatten to a 1D tensor
 
