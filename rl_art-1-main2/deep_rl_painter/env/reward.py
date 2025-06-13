@@ -40,7 +40,7 @@ def calculate_reward(current_canvas, target_canvas, device,
     Returns:
         torch.Tensor: The calculated reward (shape: [batch_size, 1]).
     """
-    # Using CLIP for calculating cosine similarity
+    # CLIP for calculating cosine similarity
     global TARGET_LATENT
     latent = get_latent_representation(current_canvas, device)
     if TARGET_LATENT is None:
@@ -49,62 +49,99 @@ def calculate_reward(current_canvas, target_canvas, device,
     mse_score_current = mse_loss(latent, TARGET_LATENT) # current_canvas - this mse needs to be lower
     mse_reward = mse_score_current * 1000
 
-    # To-do: implement aux reward based on stroke length?
-    # Auxiliary reward based on angles
+    # auxiliary reward - modified
     aux_reward = calculate_auxiliary_reward(prev_prev_point, prev_point, current_point, center)
 
-    # Combine rewards
+    # combine rewards
     total_reward = -mse_reward + aux_reward    
 
-    #return -mse_reward 
     return total_reward 
 
 def calculate_auxiliary_reward(prev_prev_point, prev_point, current_point, center):
     """
-    Computes an auxiliary reward based on angle change between consecutive vectors from the center (0,0).
-    Penalizes if angle2 < angle1; rewards if angle2 > angle1.
-
-    Args:
-        prev_prev_point (np.array or list or None): previous previous point (x, y)
-        prev_point (np.array or list or None): previous point (x, y)
-        current_point (np.array or list): current point (x, y)
+    Computes the combined auxiliary reward:
+    - Overlap penalty
+    - Stroke length (alpha threshold) penalty
 
     Returns:
         float: Auxiliary reward value.
     """
-    # if not enough points yet (steps 1 & 2) → no auxiliary reward
+    # if step 1 or 2, skip auxiliary reward
     if prev_prev_point is None or prev_point is None:
         return 0.0
 
-    # convert points to torch vectors
-    ## v1 = torch.tensor(prev_prev_point, dtype=torch.float32)
-    ## the above represents vector from top left corner (canvas coordinates 0,0) to point on cirlce
-    # vectors from center of circle (0,0) to point on circle 
-    v1 = torch.tensor(prev_prev_point - center, dtype=torch.float32)
-    v2 = torch.tensor(prev_point - center, dtype=torch.float32)
-    v3 = torch.tensor(current_point - center, dtype=torch.float32)
+    # penalty for overlapping strokes
+    # current and previosu stroke vectors 
+    v_stroke_prev = torch.tensor(prev_point - prev_prev_point, dtype=torch.float32)
+    v_stroke_current = torch.tensor(current_point - prev_point, dtype=torch.float32)
 
-    # compute angles
-    angle1 = compute_angle_between_vectors(v1, v2)
-    angle2 = compute_angle_between_vectors(v2, v3)
+    overlap_penalty = calculate_overlap_penalty(v_stroke_prev, v_stroke_current)
 
-    # compute ratio of angles
-    # To-do: what other ways to compare angle 1 and angle 2???????
-    ratio = angle2 / (angle1 + 1e-6)  # add small epsilon to avoid division by 0
+    # penalty for stroke length (smaller angles)
+    v_center_prev = torch.tensor(prev_point - center, dtype=torch.float32)
+    v_center_current = torch.tensor(current_point - center, dtype=torch.float32)
 
-    # scale - how much of the aux_reward is to be added to main reward
-    # To-do: figure out a proper value!!!!!
-    scale = 5.0 
+    stroke_length_penalty = calculate_stroke_length_penalty(v_center_prev, v_center_current)
 
-    #aux_reward = (ratio - 1.0) * scale
-    # aux reward to encourage relatively larger angles b/w consecutive points
-    # if ratio ≈ 1 → log(1) = 0 → no reward
-    # if ratio > 1 → small positive reward
-    # if ratio < 1 → small negative reward
-    aux_reward = math.log(ratio + 1e-6) * scale # to stop the reward from exploding
+    # total auxiliary reward
+    aux_reward = overlap_penalty + stroke_length_penalty
 
-    return aux_reward 
+    return aux_reward
 
+def calculate_overlap_penalty(v_stroke_prev, v_stroke_current):
+    """
+    Penalizes overlapping strokes using vector sum norm.
+
+    Returns:
+        float: Overlap penalty.
+    """
+    sum_vector = v_stroke_prev + v_stroke_current
+    # norm captures direction
+    # if same direction -> length = bigger
+    # if opp direction -> length = smaller (values cancel out to a certain extent)
+    norm_sum = torch.norm(sum_vector)
+
+    # scale
+    # TO-DO: adjust
+    overlap_scale = 5.0
+
+    # if norm_sum = smaller -> bigger penalty (for overlapping strokes)
+    # if norm_sim = bigger -> smaller penalty
+    overlap_penalty = (1.0 / (norm_sum + 1e-6)) * overlap_scale 
+
+    # Instead do: cosine sim b/w the 2 strokes ??
+    # theta = angle between their movement directions (to detect backtracking)
+    # opp direction -> 180° -> cos theta ≈ -1 -> big penalty
+    # same direction -> 0° -> cos theta ≈ +1 -> no penalty
+
+    return overlap_penalty
+
+def calculate_stroke_length_penalty(v_center_prev, v_center_current):
+    """
+    Penalizes short strokes based on angle alpha between center → prev and center → current vectors.
+
+    Returns:
+        float: Stroke length penalty.
+    """
+    angle_alpha = compute_angle_between_vectors(v_center_prev, v_center_current)
+
+    # minimum threshold angle
+    # TO-DO: adjust
+    threshold_angle = math.radians(20) 
+
+    # scale
+    # TO-DO: adjust
+    length_scale = 5.0
+
+    # if angle >= threshold, reward = 0
+    # if angle < threshold, 
+    # the shorter the stroke (or smaller the angle), the more penalty
+    if angle_alpha < threshold_angle:
+        stroke_length_penalty = ((threshold_angle - angle_alpha) / threshold_angle) * length_scale
+    else:
+        stroke_length_penalty = 0.0
+
+    return stroke_length_penalty
 
 def compute_angle_between_vectors(v1, v2):
     """
@@ -117,20 +154,20 @@ def compute_angle_between_vectors(v1, v2):
     Returns:
         torch.Tensor: Angle in radians.
     """
-    # Dot product between the vectors
+    # dot product between the vectors
     dot_product = torch.dot(v1, v2)
 
-    # Norm (length) of each vector
+    # norm (length) of each vector
     norm_v1 = torch.norm(v1)
     norm_v2 = torch.norm(v2)
 
-    # Cosine of the angle between vectors
+    # cos of the angle between vectors
     cos_theta = dot_product / (norm_v1 * norm_v2 + 1e-8)  # add epsilon for safety
 
-    # Clamp cos_theta to valid range [-1, 1] to avoid NaN due to floating point errors
+    # clamp cos_theta to valid range [-1, 1] to avoid NaN due to floating point errors
     cos_theta = torch.clamp(cos_theta, -1.0, 1.0)
 
-    # Angle in radians
+    # angle in radians
     angle = torch.acos(cos_theta)
 
     return angle
