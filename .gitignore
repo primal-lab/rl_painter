@@ -23,6 +23,7 @@ rl_art-1-main2/**/*.mp4
 # Ignore folders inside deep_rl_painter
 rl_art-1-main2/deep_rl_painter/logs/
 rl_art-1-main2/deep_rl_painter/step_outputs/
+rl_art-1-main2/deep_rl_painter/trained_models/
 
 # Ignore files inside deep_rl_painter
 rl_art-1-main2/deep_rl_painter/train.log

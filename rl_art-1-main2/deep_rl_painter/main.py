@@ -11,12 +11,16 @@ TODO:
 - Add production mode
 """
 
+import os
+os.environ["CUDA_VISIBLE_DEVICES"]="1"
+
 import argparse
 import torch
 from config import config
 from train import train
 import random
 import numpy as np
+
 
 # Set random seeds for reproducibility
 def set_seed(seed):

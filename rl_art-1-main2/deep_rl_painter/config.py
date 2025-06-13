@@ -17,7 +17,7 @@ config = {
 
     # painting environment
     "target_image_path": "target_images/target_image_1.jpg",
-    "max_strokes": 2000,                    # max number of strokes per episode
+    "max_strokes": 5000,                    # max number of strokes per episode
 
     "max_strokes_per_step": 1,               # max number of strokes per step
     "max_total_length": 10000,
@@ -40,8 +40,8 @@ config = {
     "reward_method": "CLIP_cosine_similarity",
 
     # exploration noise
-    "initial_noise_scale": 0.2,
-    "noise_decay": 0.995,
+    "initial_noise_scale": 0.5, #0.2 initially
+    "noise_decay": 0.99, #0.995
 
     # saving
 
@@ -65,5 +65,12 @@ config = {
     "log_every": 10,
     "log_level": "INFO",  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     "log_file": "training.log",
+
+    # profiling
+    # incorporate this into train.py later
+    "profile": False,  # whether to profile the training process
+
+    # resume from last saved model
+    "resume": True,
 
 }

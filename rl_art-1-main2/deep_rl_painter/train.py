@@ -21,17 +21,18 @@ import os
 import torch
 import numpy as np
 from collections import deque
-import csv
 from env.environment import PaintingEnv
 from models.actor import Actor
 from models.critic import Critic
 from models.ddpg import DDPGAgent
 from utils.noise import OUNoise
 from utils.replay_buffer import ReplayBuffer
-import cv2
 from env.canvas import save_canvas
 import torch.profiler
 import time
+import csv
+import glob
+import re
 
 
 def train(config):
@@ -88,8 +89,8 @@ def train(config):
     )
 
     # Sync target networks
-    actor_target.load_state_dict(actor.state_dict())
-    critic_target.load_state_dict(critic.state_dict())
+    #actor_target.load_state_dict(actor.state_dict())
+    #critic_target.load_state_dict(critic.state_dict())
 
     # Set optimizers
     actor_optimizer = torch.optim.Adam(
@@ -120,13 +121,61 @@ def train(config):
 
     scores_window = deque(maxlen=100) # keep track of last 100 episodes, more stable than 3 
 
-    #scores = []
-
     # Exploration noise control
     noise_scale = config["initial_noise_scale"]
     noise_decay = config["noise_decay"]
 
+    # Finding the last saved models
+    def find_last_checkpoint(model_folder, model_prefix):
+        # model_files will have a list of all files of the type "model_100.pth"
+        # * represents any string of any character
+        model_files = glob.glob(os.path.join(model_folder, f"{model_prefix}_*.pth"))
+        if not model_files:
+            return None, 0  # No saved model
+        # extract episode numbers from file names
+        episode_numbers = []
+        for file in model_files:
+            # (\d+) is the capture group which would contain the episode number here
+            match = re.search(rf"{model_prefix}_(\d+)\.pth", file)
+            if match:
+                # for each file, if matched, the episode number would be 
+                # appended to the list as an int (string -> int)
+                episode_numbers.append(int(match.group(1)))
+        if not episode_numbers:
+            return None, 0
+        # find max of the episode numbers list to get the last saved model   
+        last_episode = max(episode_numbers)
+        last_model_path = os.path.join(model_folder, f"{model_prefix}_{last_episode}.pth")
+        # return last saved model path and episode number
+        return last_model_path, last_episode
+
+    # Loading last saved models
+    # (currently - 700th)
+    start_episode = 0
+    # default to True if resume doesn't exist in config.py
+    if config.get("resume", True):
+        # get the last saved models
+        actor_path, actor_episode = find_last_checkpoint("trained_models", "actor")
+        critic_path, critic_episode = find_last_checkpoint("trained_models", "critic")
+
+        # actor and critic should be aligned
+        assert actor_episode == critic_episode, "Actor and Critic checkpoints out of sync!"
+
+        # load
+        if actor_path and critic_path:
+            print(f"\nResuming training from episode {actor_episode} \n")
+            actor.load_state_dict(torch.load(actor_path))
+            critic.load_state_dict(torch.load(critic_path))
+            start_episode = actor_episode
+        else:
+            print("\nNo saved model found, starting fresh! \n")
+
+    # Sync target networks
+    actor_target.load_state_dict(actor.state_dict())
+    critic_target.load_state_dict(critic.state_dict())
+
     # Profiling
+    # incorporate "if config[profile]" later
     with torch.profiler.profile(
         schedule=torch.profiler.schedule(wait=1, warmup=1, active=3),
         on_trace_ready=torch.profiler.tensorboard_trace_handler('./logs/profiler'),
@@ -134,7 +183,8 @@ def train(config):
         profile_memory=True,
         with_stack=True
     ) as prof:
-        for episode in range(config["episodes"]):
+        # from last saved episode, run 50,000 more episodes
+        for episode in range(start_episode, start_episode + config["episodes"]):
     # Main training loop
     #for episode in range(config["episodes"]):
             canvas = env.reset() # canvas = (H, W, C) tensor
@@ -154,7 +204,9 @@ def train(config):
                 f.write(f"Target image shape: {target_image.shape}\n")
                 f.write(f"Prev action shape: {prev_action.shape}\n\n")"""
 
-            episode_reward = 0
+            # reset OUNoise every episode
+            agent.noise.reset()
+            episode_reward = 0.0
             done = False
 
             #print(f"in train.py- canvas shape 1: {canvas.shape}, type: {type(canvas)}")
@@ -198,11 +250,11 @@ def train(config):
                 
                 # actor_prev_input = (2,) -> later converted to tensor and (2,1) in select_action()
                 # action is here numpy array (6,)
-                t0 = time.time()
+                # t0 = time.time()
                 action = agent.act(canvas_tensor, target_image, actor_prev_input, noise_scale)
-                t1 = time.time()
-                total = t1-t0
-                print("Action Time: ", total)
+                # t1 = time.time()
+                # total = t1-t0
+                # print("Action Time: ", total)
 
                 # Logs action values per step
                 """with open("logs/action_logs.csv", "a", newline="") as file:
@@ -213,12 +265,12 @@ def train(config):
 
                 # Apply action in the environment
                 # actor_current_input contains the current action's normalised x,y values
-                t2 = time.time()
+                # t2 = time.time()
                 next_canvas, reward, done, actor_current_input = env.step(action)
-                t3 = time.time()
-                total1 = t3-t2
-                print("Rendering Time: ", total1)
-                #print(f"Action: {action}")
+                # t3 = time.time()
+                # total1 = t3-t2
+                # print("Rendering Time: ", total1)
+                # #print(f"Action: {action}")
                 #print(f"Actor Current Input (x, y): {actor_current_input}")
 
                 # Logs environment transitions including shapes and rewards
@@ -284,12 +336,13 @@ def train(config):
                 # canvas_tensor = (B, C, H, W)
                 canvas = canvas_tensor
                 
-                # Save step frame every 50th stroke for select episodes
-                if (episode + 1) in [1, 2, 50, 100, 50000] and env.used_strokes % config["save_every_step"] == 0:
+                # Save 1st episode's and every 10th episode's final step (2000th step)
+                if ((episode + 1) == 1 or (episode + 1) % 10 == 0) and env.used_strokes == config["max_strokes"] - 1:
                     step_dir = f"step_outputs/episode_{episode + 1}"
                     os.makedirs(step_dir, exist_ok=True)
                     # sample path: step_outputs/episode_25000/episode_25000_step_00150.png
-                    save_path = os.path.join(step_dir, f"step_{env.used_strokes}.png")
+                    #save_path = os.path.join(step_dir, f"step_{env.used_strokes}.png")
+                    save_path = os.path.join(step_dir, f"final_step_{config['max_strokes']}.png")
                     # canvas is (B, C, H, W)
                     """img_tensor = canvas[0].detach().cpu()  # Take the first image in the batch
                     if img_tensor.shape[0] == 1:
@@ -304,19 +357,20 @@ def train(config):
                     canvas_to_save = canvas_to_save.permute(1, 2, 0).contiguous()  # → (H, W, C)
                     save_canvas(canvas_to_save, save_path)
                 prev_action = action
-                episode_reward += reward
+                episode_reward += reward.item() #just assigning the float value
 
                 # Log step reward
-                """with open("logs/step_rewards.csv", mode="a", newline="") as file:
+                with open("logs/step_rewards.csv", mode="a", newline="") as file:
                     writer = csv.writer(file)
                     if episode == 0 and env.used_strokes == 1:  # write header only once
                         writer.writerow(["episode", "step", "reward"])
-                    writer.writerow([episode + 1, env.used_strokes, reward])"""
+                    writer.writerow([episode + 1, env.used_strokes, reward.item()])
                 print(f"Episode {episode + 1} | Step {env.used_strokes} | Step Reward: {reward}")
 
 
-            # Decay exploration noise
-            noise_scale *= noise_decay
+            # Decay exploration noise every 20 episodes
+            if (episode + 1) % 20 == 0:
+                noise_scale *= noise_decay
             #scores.append(episode_reward) - not being used anywhere
             # Log episode reward
             """with open("logs/episode_rewards.csv", mode="a", newline="") as file:
@@ -325,7 +379,8 @@ def train(config):
                     writer.writerow(["episode", "total_reward"])
                 writer.writerow([episode + 1, episode_reward])"""
             scores_window.append(episode_reward)
-            running_avg = torch.stack(list(scores_window)).mean()
+            #running_avg = torch.stack(list(scores_window)).mean()
+            running_avg = np.mean(list(scores_window))
 
             # Logs the running average reward over last 100 episodes
             """with open("logs/running_avg.csv", "a", newline="") as file:
@@ -334,9 +389,15 @@ def train(config):
                     writer.writerow(["episode", "running_avg_100"])
                 writer.writerow([episode + 1, np.mean(scores_window)])"""
 
+            # Log episode reward
+            with open("logs/episode_rewards.csv", mode="a", newline="") as file:
+                writer = csv.writer(file)
+                if episode == 0:
+                    writer.writerow(["episode", "episode_reward"])  # Header once
+                writer.writerow([episode + 1, episode_reward])
             # Progress log
             print(
-                f"Episode {episode + 1} | Reward: {episode_reward} | Running Avg(100): {running_avg.item():.2f}")
+                f"Episode {episode + 1} | Reward: {episode_reward} | Running Avg(100): {running_avg:.2f}")
 
             # Save model checkpoints every 100 episodes
             if (episode + 1) % config["save_every_episode"] == 0:

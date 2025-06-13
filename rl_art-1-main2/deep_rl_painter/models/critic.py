@@ -108,8 +108,8 @@ class Critic(nn.Module):
         out = self.model(input_image_1, input_image_2, action_input)
 
         # Log Q-value shape and value from Critic
-        with open("logs/model/critic_output.log", "a") as f:
-           f.write(f"Q-value shape: {out.shape}, Value: {out.detach().cpu().numpy().tolist()}\n")
+        #with open("logs/model/critic_output.log", "a") as f:
+        #   f.write(f"Q-value shape: {out.shape}, Value: {out.detach().cpu().numpy().tolist()}\n")
 
         return out
 

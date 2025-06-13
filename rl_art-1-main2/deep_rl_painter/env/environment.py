@@ -19,7 +19,6 @@ import gym
 import numpy as np
 import cv2
 import torch
-from gym import spaces
 from .canvas import init_canvas, update_canvas
 from .reward import calculate_reward
 import pdb
@@ -53,6 +52,8 @@ class PaintingEnv(gym.Env):
         self.radius = min(self.canvas_size[0], self.canvas_size[1]) // 2
 
         # removed action space and observation space
+        os.makedirs("logs/env", exist_ok=True)
+
         self._initialize()
 
     def _initialize(self):
@@ -67,6 +68,10 @@ class PaintingEnv(gym.Env):
         else:  # RGB canvas
             self.canvas = init_canvas(
                 (self.canvas_size[0], self.canvas_size[1], self.channels))
+        
+        # initialize point history
+        self.prev_prev_point = None
+        self.prev_point = None
         self.current_point = self.random_circle_point()
         self.used_strokes = 0
 
@@ -122,22 +127,11 @@ class PaintingEnv(gym.Env):
         The action is a 2D vector representing the direction of the stroke.
         The reward is calculated based on the difference between the current canvas and the target image.
         """
-        os.makedirs("logs/env", exist_ok=True)
+        
 
         # self.canvas = prev_canvas = (H, W, C)
         prev_canvas = self.canvas.clone()
 
-        # Calculate direction and next point
-        #unit_vector = action[:2] / (np.linalg.norm(action[:2]) + 1e-8)
-        
-        """norm = np.linalg.norm(action[:2])
-        # Validate norm and action
-        if norm < 1e-6 or np.any(np.isnan(action[:2])):
-            unit_vector = np.array([1.0, 0.0])  # fallback direction
-        else:
-            unit_vector = action[:2] / norm"""
-        
-        # action is numpy here
         # Calculate direction and next point
         direction = action[:2]
         # Check for NaNs or near-zero norm 
@@ -147,29 +141,30 @@ class PaintingEnv(gym.Env):
             unit_vector = direction / (np.linalg.norm(direction) + 1e-8)
 
         # Log action, unit vector, and norm for each stroke
-        #with open("logs/env/step_vectors.log", "a") as f:
+        # with open("logs/env/step_vectors.log", "a") as f:
         #    f.write(f"Stroke {self.used_strokes + 1} | Action: {action.tolist()} | Unit Vector: {unit_vector.tolist()} | Norm: {norm}\n")
-
-        # NaN check
-        if np.any(np.isnan(unit_vector)):
-            raise ValueError(f"unit_vector is NaN! Action: {action}, norm: {norm}")
 
         next_point = np.array([
             self.center[0] + unit_vector[0] * self.radius,
             self.center[1] + unit_vector[1] * self.radius], dtype=np.float32)
 
-        # self.canvas = (H, W, C)
-        t0 = time.time()
+        # t0 = time.time()
+        # self.canvas is (H, W, C)
         self.canvas = update_canvas(self.canvas, tuple(self.current_point), tuple(next_point))
-        t1 = time.time()
-        total = t1-t0
+        # t1 = time.time()
+        # total = t1-t0
         #print("(in env.step) Rendering Time: ", total)
         self.used_strokes += 1
 
         # Log stroke movement from previous to next point
         #with open("logs/env/strokes.log", "a") as f:
         #    f.write(f"Episode stroke {self.used_strokes} | From: {tuple(self.current_point)} → To: {tuple(next_point)}\n")
-        self.current_point = next_point
+        
+        # Update point history
+        self.prev_prev_point = self.prev_point
+        self.prev_point = self.current_point.copy()
+        self.current_point = next_point.copy()
+        #self.current_point = next_point
         
         # Compute reward
         prev_tensor = self.to_tensor(prev_canvas) # not being used
@@ -177,10 +172,15 @@ class PaintingEnv(gym.Env):
         target_tensor = self.to_tensor(self.target_image)
 
         # reward is a tensor here
-        t2 = time.time()
-        reward = calculate_reward(prev_tensor, current_tensor, target_tensor, device=self.device)
-        t3 = time.time()
-        total1 = t3-t2
+        # t2 = time.time()
+        #reward = calculate_reward(current_tensor, target_tensor, device=self.device)
+        reward = calculate_reward(current_tensor, target_tensor, device=self.device,
+                          prev_prev_point=self.prev_prev_point,
+                          prev_point=self.prev_point,
+                          current_point=self.current_point, 
+                          center=self.center)
+        # t3 = time.time()
+        # total1 = t3-t2
         #print("in env.step = Reward:", total1)
         done = self.used_strokes >= self.max_strokes
         
@@ -192,15 +192,10 @@ class PaintingEnv(gym.Env):
         #    f.write(f"Stroke {self.used_strokes} | Reward: {reward.item()}\n")
 
         canvas_to_return = self.canvas # (H, W, C)
-        #canvas_to_return = np.transpose(canvas_to_return, (2, 0, 1))  # (C, H, W)
         if isinstance(canvas_to_return, torch.Tensor):
             canvas_to_return = canvas_to_return.permute(2, 0, 1).contiguous()  # (C, H, W)
         else:
             canvas_to_return = np.transpose(canvas_to_return, (2, 0, 1))       # (C, H, W)
-
-        # reward.item() gives a plain float value as expected by train.py instead of a tensor
-        # return canvas_to_return, reward.item(), done
-        # replay_buffer.store() already handles conversion to tensor
         return canvas_to_return, reward, done, next_point
 
 
@@ -213,9 +208,9 @@ class PaintingEnv(gym.Env):
         self._initialize()
         return self.canvas
 
-    """def render(self, mode='human'):
-        cv2.imshow('Canvas', self.canvas)
-        cv2.waitKey(1)"""
+    # def render(self, mode='human'):
+    #     cv2.imshow('Canvas', self.canvas)
+    #     cv2.waitKey(1)
 
     def render(self, episode_num=None, output_dir=None):
         """

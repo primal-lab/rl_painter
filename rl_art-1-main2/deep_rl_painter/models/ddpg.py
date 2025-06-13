@@ -52,6 +52,8 @@ class DDPGAgent:
         self.actor_target = actor_target.to(self.device)
         self.critic_target = critic_target.to(self.device)
 
+        os.makedirs("logs/model", exist_ok=True)
+
 
     def select_action(self, canvas, target_image, prev_action):
         """
@@ -66,32 +68,21 @@ class DDPGAgent:
         Returns:
             action (np.ndarray): Next action predicted by actor network. (6,)
         """
-        os.makedirs("logs/model", exist_ok=True)
 
-        device = self.config["device"]
-        
         # canvas = target_image = (B, C, H, W) = already tensors from train.py
 
         if isinstance(prev_action, np.ndarray):
             prev_action = torch.from_numpy(prev_action).float() # convert to tensor
         if prev_action.ndim == 1:
             prev_action = prev_action.unsqueeze(0)  # (2,) → (1, 2)
-        prev_action = prev_action.to(device)
-
-        """print(f"When getting the action - ") 
-        print(f"Canvas shape: {canvas.shape}")  # (B, H, W, C)
-        print(f"Target image shape: {target_image.shape}")  # (B, H, W, C) 
-        print(f"Previous action shape: {prev_action.shape}") # (B, action_dim)"""
+        # prev_action = prev_action.to(self.device)
 
         self.actor.eval()
         with torch.no_grad():
             out = self.actor(canvas, target_image, prev_action).cpu().numpy() # (B, action_dim)
             action = out[0]  # Remove batch dimension (take the first row - 6 params) = (6,)
             # Log actor output shape and values
-            #os.makedirs("logs/model", exist_ok=True)
             with open("logs/model/actor_actions.log", "a") as f:
-                #import pdb
-                #pdb.set_trace()
                 f.write(f"Action shape: {out.shape}, Values: {out.tolist()}\n")
         self.actor.train()
         return action
@@ -104,9 +95,8 @@ class DDPGAgent:
             canvas (torch.tensor): Current canvas. Dimensions: (B, H, W, C)
             target_image (torch.tensor): Target image. Dimensions: (B, H, W, C)
             prev_action (np.ndarray): normalised (x,y).  Dimensions: (2,)
-            noise_scale (float): Scale of the noise to be added. 
+            noise_scale (float): Scale of the noise to be added. (0.01 is default)
         Used to control exploration.
-
 
         Returns:
             action (np.ndarray): Noisy action for exploration.
@@ -145,7 +135,7 @@ class DDPGAgent:
             return
 
         B = self.config["batch_size"]
-        device = self.config["device"]
+        # device = self.config["device"]
 
         canvas, prev_actions, actions, next_canvas, rewards, dones = self.replay_buffer.sample(B)
 
@@ -227,7 +217,7 @@ class DDPGAgent:
         self.actor_optimizer.step()
 
         # Log critic and actor loss to disk
-        #with open("logs/model/losses.log", "a") as f:
+        # with open("logs/model/losses.log", "a") as f:
         #    f.write(f"Critic Loss: {critic_loss.item():.6f}, Actor Loss: {actor_loss.item():.6f}\n")
         
         # error detection
