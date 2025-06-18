@@ -114,6 +114,7 @@ class Actor(nn.Module):
         # Normalization - actor.py - why?
         #import pdb
         #pdb.set_trace()
+        # out of every single batch, get the first 2 columns
         direction = out[:, :2]
         norm = torch.norm(direction, dim=1)
         normalized_direction = direction / (norm.unsqueeze(1) + 1e-16)

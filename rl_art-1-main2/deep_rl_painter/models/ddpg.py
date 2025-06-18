@@ -82,8 +82,8 @@ class DDPGAgent:
             out = self.actor(canvas, target_image, prev_action).cpu().numpy() # (B, action_dim)
             action = out[0]  # Remove batch dimension (take the first row - 6 params) = (6,)
             # Log actor output shape and values
-            with open("logs/model/actor_actions.log", "a") as f:
-                f.write(f"Action shape: {out.shape}, Values: {out.tolist()}\n")
+            #with open("logs/model/actor_actions.log", "a") as f:
+            #    f.write(f"Action shape: {out.shape}, Values: {out.tolist()}\n")
         self.actor.train()
         return action
 

@@ -17,7 +17,7 @@ config = {
 
     # painting environment
     "target_image_path": "target_images/target_image_1.jpg",
-    "max_strokes": 5000,                    # max number of strokes per episode
+    "max_strokes": 2000,                    # max number of strokes per episode
 
     "max_strokes_per_step": 1,               # max number of strokes per step
     "max_total_length": 10000,

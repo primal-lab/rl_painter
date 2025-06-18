@@ -17,6 +17,8 @@ from torch.nn.functional import cosine_similarity
 import clip
 import time
 import math
+import os
+import csv
 
 # target_latent
 TARGET_LATENT = None
@@ -53,7 +55,19 @@ def calculate_reward(current_canvas, target_canvas, device,
     aux_reward = calculate_auxiliary_reward(prev_prev_point, prev_point, current_point, center)
 
     # combine rewards
-    total_reward = -mse_reward + aux_reward    
+    total_reward = -mse_reward + aux_reward  
+
+    # logging MSE and Aux rewards ---
+    os.makedirs("logs/debug", exist_ok=True)
+    log_file = "logs/debug/reward_breakdown.csv"
+
+    with open(log_file, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        if os.stat(log_file).st_size == 0:  # write header only if file is empty
+            writer.writerow(["mse_reward", "aux_reward"])
+        mse_val = -mse_reward.item()
+        aux_val = aux_reward.item() if isinstance(aux_reward, torch.Tensor) else aux_reward
+        writer.writerow([mse_val, aux_val])
 
     return total_reward 
 
@@ -103,7 +117,7 @@ def calculate_overlap_penalty(v_stroke_prev, v_stroke_current):
 
     # scale
     # TO-DO: adjust
-    overlap_scale = 5.0
+    overlap_scale = 15.0
 
     # if norm_sum = smaller -> bigger penalty (for overlapping strokes)
     # if norm_sim = bigger -> smaller penalty
@@ -131,7 +145,7 @@ def calculate_stroke_length_penalty(v_center_prev, v_center_current):
 
     # scale
     # TO-DO: adjust
-    length_scale = 5.0
+    length_scale = 15.0
 
     # if angle >= threshold, reward = 0
     # if angle < threshold, 

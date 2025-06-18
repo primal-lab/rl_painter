@@ -133,7 +133,9 @@ class PaintingEnv(gym.Env):
         prev_canvas = self.canvas.clone()
 
         # Calculate direction and next point
-        direction = action[:2]
+        # x,y is a unit vector (from actor.py) + noise (from ddpg.py)
+        # so normalise again
+        direction = action[:2] 
         # Check for NaNs or near-zero norm 
         if np.any(np.isnan(direction)) or np.linalg.norm(direction) < 1e-6:
             unit_vector = np.array([1.0, 0.0], dtype=np.float32)  # safe default
@@ -144,6 +146,7 @@ class PaintingEnv(gym.Env):
         # with open("logs/env/step_vectors.log", "a") as f:
         #    f.write(f"Stroke {self.used_strokes + 1} | Action: {action.tolist()} | Unit Vector: {unit_vector.tolist()} | Norm: {norm}\n")
 
+        # get the points on the circle (using the unit vec) by scaling it with radius
         next_point = np.array([
             self.center[0] + unit_vector[0] * self.radius,
             self.center[1] + unit_vector[1] * self.radius], dtype=np.float32)
