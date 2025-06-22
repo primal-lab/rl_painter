@@ -31,7 +31,7 @@ PREPROCESS = None
 
 #def calculate_reward(current_canvas, target_canvas, device):
 def calculate_reward(current_canvas, target_canvas, device,
-                     prev_prev_point, prev_point, current_point, center):
+                     prev_prev_point, prev_point, current_point, center, edge_map=None):
     """
     Calculates the reward based on the chosen reward function.
 
@@ -69,7 +69,40 @@ def calculate_reward(current_canvas, target_canvas, device,
         aux_val = aux_reward.item() if isinstance(aux_reward, torch.Tensor) else aux_reward
         writer.writerow([mse_val, aux_val])
 
+    # check if current stroke intersects with target image canny edges
+    # if so, reward higher
+    if edge_map is not None and prev_point is not None and current_point is not None:
+        if stroke_intersects_edge(prev_point, current_point, edge_map):
+            edge_bonus = 200 # TO-DO: Adjust
+            total_reward += edge_bonus
+   
     return total_reward 
+
+import numpy as np
+from skimage.draw import line as skimage_line  
+
+def stroke_intersects_edge(start, end, edge_map, threshold=0.8):
+    """
+    Checks if the line between start and end intersects any edge pixels.
+    """
+    # read the start and end points
+    x1, y1 = int(start[0]), int(start[1])
+    x2, y2 = int(end[0]), int(end[1])
+    # read the shape of the canvas/edge_map
+    H, W = edge_map.shape
+
+    # line gets the pixels containing the stroke
+    rr, cc = skimage_line(y1, x1, y2, x2)  #skimage uses (row, col) = (y, x)
+    # just to make sure the pixels are on the canvas
+    rr = np.clip(rr, 0, H - 1)
+    cc = np.clip(cc, 0, W - 1)
+
+    # read the values of all the selected pixels
+    values = edge_map[rr, cc].detach().cpu().numpy()
+    # avg all the values of the selected pixels 
+    # if the avg is > threshold, return true
+    return np.mean(values) > threshold
+
 
 def calculate_auxiliary_reward(prev_prev_point, prev_point, current_point, center):
     """

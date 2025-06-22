@@ -47,6 +47,7 @@ def train(config):
     # Initialize environment and load target image
     env = PaintingEnv(
         target_image_path=config["target_image_path"],
+        target_edges_path=config["target_edges_path"],
         canvas_size=config["canvas_size"],
         canvas_channels=config["canvas_channels"],
         max_strokes=config["max_strokes"],

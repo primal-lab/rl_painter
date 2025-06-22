@@ -26,7 +26,9 @@ from typing import Tuple, Union
 import time
 
 class PaintingEnv(gym.Env):
-    def __init__(self, target_image_path: str, canvas_size: Tuple[int, int], canvas_channels: int, max_strokes: int, device: str):
+    def __init__(self, target_image_path: str, target_edges_path: str,
+             canvas_size: Tuple[int, int], canvas_channels: int,
+             max_strokes: int, device: str):
         """
         Initializes the Painting Environment.
         Args:
@@ -51,6 +53,9 @@ class PaintingEnv(gym.Env):
         self.center = np.array([self.canvas_size[0], self.canvas_size[1]]) // 2
         self.radius = min(self.canvas_size[0], self.canvas_size[1]) // 2
 
+        # target image canny edges
+        self.target_edges_path = target_edges_path
+
         # removed action space and observation space
         os.makedirs("logs/env", exist_ok=True)
 
@@ -74,6 +79,13 @@ class PaintingEnv(gym.Env):
         self.prev_point = None
         self.current_point = self.random_circle_point()
         self.used_strokes = 0
+
+        # load target_image_1 canny edge map
+        edge_path = self.target_edges_path
+        edge_img = cv2.imread(edge_path, cv2.IMREAD_GRAYSCALE) # [0, 255]
+        edge_img = cv2.resize(edge_img, (self.canvas_size[1], self.canvas_size[0]))  # W, H
+        edge_tensor = torch.tensor(edge_img / 255.0, dtype=torch.float32).to(self.device) # [0.0, 1.0]???
+        self.edge_map = edge_tensor  # shape: (H, W)
 
     def load_image(self) -> Union[np.ndarray, torch.Tensor]:
         """
@@ -181,7 +193,7 @@ class PaintingEnv(gym.Env):
                           prev_prev_point=self.prev_prev_point,
                           prev_point=self.prev_point,
                           current_point=self.current_point, 
-                          center=self.center)
+                          center=self.center, edge_map=self.edge_map)
         # t3 = time.time()
         # total1 = t3-t2
         #print("in env.step = Reward:", total1)
