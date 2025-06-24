@@ -33,6 +33,8 @@ import time
 import csv
 import glob
 import re
+from utils.simplified_targets import generate_simplified_targets
+import cv2
 
 
 def train(config):
@@ -43,9 +45,9 @@ def train(config):
     Args:
         config (dict): Configuration dictionary containing hyperparameters and paths.
     """
-
-    # Initialize environment and load target image
-    env = PaintingEnv(
+    # create dummy env to access target_image 
+    # to pass into generate_simplified_targets
+    dummy_env = PaintingEnv(
         target_image_path=config["target_image_path"],
         target_edges_path=config["target_edges_path"],
         canvas_size=config["canvas_size"],
@@ -54,10 +56,31 @@ def train(config):
         device=config["device"]
     )
 
+    # dummy_env.target_image = (H, W, C)
+    # target_image = (B, C, H, W)
+    target_image = torch.from_numpy(dummy_env.target_image / 255.0).permute(2, 0, 1).unsqueeze(0).float().to(config["device"])
+
+    # generate simplified versions once
+    simplified_targets = generate_simplified_targets(
+        target_image,
+        save_dir="logs/debug/target_versions"
+    )
+
+    # Initialize (actual/real) environment here and load target image
+    env = PaintingEnv(
+        target_image_path=config["target_image_path"],
+        target_edges_path=config["target_edges_path"],
+        canvas_size=config["canvas_size"],
+        canvas_channels=config["canvas_channels"],
+        max_strokes=config["max_strokes"],
+        device=config["device"],
+        simplified_targets=simplified_targets #pass in target_image versions
+    )
+
     # Load target image
     # env.target_image = (H, W, C)
     # target_image = (B, C, H, W)
-    target_image = torch.from_numpy(env.target_image).permute(2, 0, 1).unsqueeze(0).float().to(config["device"])
+    #target_image = torch.from_numpy(env.target_image).permute(2, 0, 1).unsqueeze(0).float().to(config["device"])
 
     # Initialize Actor & Critic networks (main and target)
     actor = Actor(

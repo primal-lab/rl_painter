@@ -19,6 +19,8 @@ import time
 import math
 import os
 import csv
+import numpy as np
+from skimage.draw import line as skimage_line  
 
 # target_latent
 TARGET_LATENT = None
@@ -77,9 +79,6 @@ def calculate_reward(current_canvas, target_canvas, device,
             total_reward += edge_bonus
    
     return total_reward 
-
-import numpy as np
-from skimage.draw import line as skimage_line  
 
 def stroke_intersects_edge(start, end, edge_map, threshold=0.8):
     """

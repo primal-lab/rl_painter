@@ -1,3 +1,6 @@
+# not called anywhere in the project
+# use this to generate an image once individually and just refer to the image directly in the code
+# via config.py
 import os
 import cv2
 import numpy as np
