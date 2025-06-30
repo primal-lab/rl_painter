@@ -13,12 +13,13 @@ config = {
     "train": True,
     "seed": 42,
 
-    "episodes": 50000,                        # change to 500 or more later
+    "episodes": 5000,                        # change to 500 or more later
 
     # painting environment
     "target_image_path": "target_images/target_image_1.jpg",
+    #"target_image_path": "target_images/target_image_test.png",
     "target_edges_path": "canny_edges/target_edges_1.png",  # canny edges of the target image
-    "max_strokes": 5000,                    # max number of strokes per episode
+    "max_strokes": 2000,                    # max number of strokes per episode
 
     "max_strokes_per_step": 1,               # max number of strokes per step
     "max_total_length": 10000,
@@ -26,8 +27,8 @@ config = {
 
     # model parameters
     "model_name": "resnet18",                # check models/image_encoder.py for available models
-    "actor_lr": 1e-6,           
-    "critic_lr": 1e-5,
+    "actor_lr": 1e-4,           
+    "critic_lr": 1e-4,
     #"buffer_size": 100000, same thing as below
     "replay_buffer_capacity": 100000,
 
@@ -72,6 +73,6 @@ config = {
     "profile": False,  # whether to profile the training process
 
     # resume from last saved model
-    "resume": True,
+    "resume": False,
 
 }

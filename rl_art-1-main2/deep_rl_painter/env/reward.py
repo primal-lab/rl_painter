@@ -51,13 +51,13 @@ def calculate_reward(current_canvas, target_canvas, device,
         TARGET_LATENT = get_latent_representation(target_canvas, device)
 
     mse_score_current = mse_loss(latent, TARGET_LATENT) # current_canvas - this mse needs to be lower
-    mse_reward = mse_score_current * 1000
+    mse_reward = mse_score_current * 10
 
     # auxiliary reward - modified
     aux_reward = calculate_auxiliary_reward(prev_prev_point, prev_point, current_point, center)
 
     # combine rewards
-    total_reward = -mse_reward + aux_reward  
+    total_reward = -mse_reward - aux_reward  
 
     # logging MSE and Aux rewards ---
     os.makedirs("logs/debug", exist_ok=True)
@@ -75,9 +75,10 @@ def calculate_reward(current_canvas, target_canvas, device,
     # if so, reward higher
     if edge_map is not None and prev_point is not None and current_point is not None:
         if stroke_intersects_edge(prev_point, current_point, edge_map):
-            edge_bonus = 200 # TO-DO: Adjust
+            edge_bonus = 0.5 # TO-DO: Adjust
             total_reward += edge_bonus
-   
+    
+    total_reward /= 2.0
     return total_reward 
 
 def stroke_intersects_edge(start, end, edge_map, threshold=0.8):
@@ -90,13 +91,13 @@ def stroke_intersects_edge(start, end, edge_map, threshold=0.8):
     # read the shape of the canvas/edge_map
     H, W = edge_map.shape
 
-    # line gets the pixels containing the stroke
+    # line gets the pixels containing the stroke on the canvas image
     rr, cc = skimage_line(y1, x1, y2, x2)  #skimage uses (row, col) = (y, x)
     # just to make sure the pixels are on the canvas
     rr = np.clip(rr, 0, H - 1)
     cc = np.clip(cc, 0, W - 1)
 
-    # read the values of all the selected pixels
+    # read the values of all the selected pixels on the edges image
     values = edge_map[rr, cc].detach().cpu().numpy()
     # avg all the values of the selected pixels 
     # if the avg is > threshold, return true
@@ -124,13 +125,14 @@ def calculate_auxiliary_reward(prev_prev_point, prev_point, current_point, cente
     overlap_penalty = calculate_overlap_penalty(v_stroke_prev, v_stroke_current)
 
     # penalty for stroke length (smaller angles)
-    v_center_prev = torch.tensor(prev_point - center, dtype=torch.float32)
-    v_center_current = torch.tensor(current_point - center, dtype=torch.float32)
+    #v_center_prev = torch.tensor(prev_point - center, dtype=torch.float32)
+    #v_center_current = torch.tensor(current_point - center, dtype=torch.float32)
 
-    stroke_length_penalty = calculate_stroke_length_penalty(v_center_prev, v_center_current)
+    #stroke_length_penalty = calculate_stroke_length_penalty(v_center_prev, v_center_current)
 
     # total auxiliary reward
-    aux_reward = overlap_penalty + stroke_length_penalty
+    #aux_reward = overlap_penalty + stroke_length_penalty
+    aux_reward = overlap_penalty
 
     return aux_reward
 
@@ -149,7 +151,7 @@ def calculate_overlap_penalty(v_stroke_prev, v_stroke_current):
 
     # scale
     # TO-DO: adjust
-    overlap_scale = 15.0
+    overlap_scale = 5.0
 
     # if norm_sum = smaller -> bigger penalty (for overlapping strokes)
     # if norm_sim = bigger -> smaller penalty
@@ -177,7 +179,7 @@ def calculate_stroke_length_penalty(v_center_prev, v_center_current):
 
     # scale
     # TO-DO: adjust
-    length_scale = 15.0
+    length_scale = 5.0
 
     # if angle >= threshold, reward = 0
     # if angle < threshold, 

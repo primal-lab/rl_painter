@@ -325,6 +325,7 @@ def train(config):
                 # next_canvas = (C, H, W)
                 actor_prev_input = np.round(actor_prev_input, 6).astype(np.float32)
                 actor_current_input = np.round(actor_current_input, 6).astype(np.float32)
+                # actor_prev_input, actor_current_input are being stored in absolute coordinates
                 replay_buffer.store(
                     canvas_for_buffer,
                     #prev_action,
