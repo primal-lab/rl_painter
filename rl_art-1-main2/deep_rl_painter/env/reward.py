@@ -56,8 +56,11 @@ def calculate_reward(current_canvas, target_canvas, device,
     # auxiliary reward - modified
     aux_reward = calculate_auxiliary_reward(prev_prev_point, prev_point, current_point, center)
 
-    # combine rewards
-    total_reward = -mse_reward - aux_reward  
+    # compute edge-based reward (penalty or bonus)
+    if edge_map is not None and prev_point is not None and current_point is not None:
+        edge_reward = stroke_intersects_edge(prev_point, current_point, edge_map)
+    else:
+        edge_reward = 0.0
 
     # logging MSE and Aux rewards ---
     os.makedirs("logs/debug", exist_ok=True)
@@ -66,22 +69,20 @@ def calculate_reward(current_canvas, target_canvas, device,
     with open(log_file, mode="a", newline="") as file:
         writer = csv.writer(file)
         if os.stat(log_file).st_size == 0:  # write header only if file is empty
-            writer.writerow(["mse_reward", "aux_reward"])
+            writer.writerow(["mse_reward", "aux_reward", "edges_reward"])
         mse_val = -mse_reward.item()
-        aux_val = aux_reward.item() if isinstance(aux_reward, torch.Tensor) else aux_reward
-        writer.writerow([mse_val, aux_val])
+        aux_val = -aux_reward.item() if isinstance(aux_reward, torch.Tensor) else -aux_reward
+        edges_val = -edge_reward
+        writer.writerow([mse_val, aux_val, edges_val])
 
-    # check if current stroke intersects with target image canny edges
-    # if so, reward higher
-    if edge_map is not None and prev_point is not None and current_point is not None:
-        if stroke_intersects_edge(prev_point, current_point, edge_map):
-            edge_bonus = 0.5 # TO-DO: Adjust
-            total_reward += edge_bonus
+    # combine all penalties
+    total_reward = - mse_reward - aux_reward - edge_reward
     
     total_reward /= 2.0
     return total_reward 
 
-def stroke_intersects_edge(start, end, edge_map, threshold=0.8):
+#def stroke_intersects_edge(start, end, edge_map, threshold=0.8):
+def stroke_intersects_edge(start, end, edge_map):
     """
     Checks if the line between start and end intersects any edge pixels.
     """
@@ -101,8 +102,15 @@ def stroke_intersects_edge(start, end, edge_map, threshold=0.8):
     values = edge_map[rr, cc].detach().cpu().numpy()
     # avg all the values of the selected pixels 
     # if the avg is > threshold, return true
-    return np.mean(values) > threshold
+    #return np.mean(values) > threshold
 
+    mean_val = np.mean(values)
+   #mean = max(mean_val, 1e-3) # to avoid division by 0 (when avg = 0)
+    reward = ((1 / (mean + 1e-6)) - 1) * 0.01
+    #print(f"[DEBUG] edge_map mean_val: {mean:.4f}")
+    #print(f"[DEBUG] edge_map reward: {reward:.4f}")
+    # reward = 1.0 - mean_val
+    return reward
 
 def calculate_auxiliary_reward(prev_prev_point, prev_point, current_point, center):
     """

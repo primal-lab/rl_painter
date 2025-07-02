@@ -190,8 +190,8 @@ class PaintingEnv(gym.Env):
         # target_tensor = (B, H, W, C)
         #target_tensor = self.to_tensor(self.target_image)
 
-        # select the right simplified target version (out of 5) based on stroke count
-        stage_idx = min(4, self.used_strokes // 1000)
+        # select the right simplified target version (out of 10) based on stroke count
+        stage_idx = min(9, self.used_strokes // 200)
         # simplified_targets[stage_idx] = (B, C, H, W)
         # target_tensor = (B, H, W, C)
         target_tensor = self.simplified_targets[stage_idx].permute(0, 2, 3, 1).to(self.device)
