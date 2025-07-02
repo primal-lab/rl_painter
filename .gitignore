@@ -7,6 +7,9 @@
 !rl_art-1-main2/
 !rl_art-1-main2/**
 
+# Allow the root-level README
+!README.md
+
 # Inside rl_art-1-main2/ folder, ignore - 
 
 # Ignore all __pycache__ folders everywhere
