@@ -136,7 +136,7 @@ class PaintingEnv(gym.Env):
         #!return torch.tensor(img).unsqueeze(0).to(self.device)  # [1, C, H, W]
         return torch.tensor(img, device=self.device).unsqueeze(0)
 
-    def step(self, action):
+    def step(self, action, remaining_episodes=None):
         """
         Takes a step in the environment using the given action.
         The action is a 2D vector representing the direction of the stroke.
@@ -203,7 +203,8 @@ class PaintingEnv(gym.Env):
                           prev_prev_point=self.prev_prev_point,
                           prev_point=self.prev_point,
                           current_point=self.current_point, 
-                          center=self.center, edge_map=self.edge_map)
+                          center=self.center, edge_map=self.edge_map, 
+                          remaining_episodes=remaining_episodes)
         # t3 = time.time()
         # total1 = t3-t2
         #print("in env.step = Reward:", total1)

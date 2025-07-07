@@ -290,7 +290,8 @@ def train(config):
                 # Apply action in the environment
                 # actor_current_input contains the current action's normalised x,y values
                 # t2 = time.time()
-                next_canvas, reward, done, actor_current_input = env.step(action)
+                remaining_episodes = config["episodes"] - episode
+                next_canvas, reward, done, actor_current_input = env.step(action, remaining_episodes=remaining_episodes)
                 # t3 = time.time()
                 # total1 = t3-t2
                 # print("Rendering Time: ", total1)

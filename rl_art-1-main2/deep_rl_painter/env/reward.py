@@ -21,6 +21,7 @@ import os
 import csv
 import numpy as np
 from skimage.draw import line as skimage_line  
+from config import config
 
 # target_latent
 TARGET_LATENT = None
@@ -29,11 +30,12 @@ TARGET_LATENT = None
 CLIP_MODEL = None
 PREPROCESS = None
 # model, preprocess = None, None
-
+TOTAL_EPISODES = config["episodes"]
 
 #def calculate_reward(current_canvas, target_canvas, device):
 def calculate_reward(current_canvas, target_canvas, device,
-                     prev_prev_point, prev_point, current_point, center, edge_map=None):
+                     prev_prev_point, prev_point, current_point, center, 
+                     edge_map=None, remaining_episodes=None):
     """
     Calculates the reward based on the chosen reward function.
 
@@ -62,7 +64,7 @@ def calculate_reward(current_canvas, target_canvas, device,
     else:
         edge_reward = 0.0
 
-    # logging MSE and Aux rewards ---
+    """#logging MSE and Aux rewards ---
     os.makedirs("logs/debug", exist_ok=True)
     log_file = "logs/debug/reward_breakdown.csv"
 
@@ -70,16 +72,33 @@ def calculate_reward(current_canvas, target_canvas, device,
         writer = csv.writer(file)
         if os.stat(log_file).st_size == 0:  # write header only if file is empty
             writer.writerow(["mse_reward", "aux_reward", "edges_reward"])
+            #writer.writerow(["edges_reward"])
         mse_val = -mse_reward.item()
         aux_val = -aux_reward.item() if isinstance(aux_reward, torch.Tensor) else -aux_reward
         edges_val = -edge_reward
         writer.writerow([mse_val, aux_val, edges_val])
+        #writer.writerow([edges_val])
 
     # combine all penalties
-    total_reward = - mse_reward - aux_reward - edge_reward
+    #total_reward = - mse_reward - aux_reward - edge_reward"""
+
+    # dynamic reward system 
+    if remaining_episodes is not None:
+        #if remaining_episodes > 0.5 * TOTAL_EPISODES:
+        if remaining_episodes > 4800: # for first 200 episodes, consider this loss func
+            # Early phase: encourage exploration (big strokes + outline tracing)
+            total_reward = - aux_reward - edge_reward
+        else:
+            # Later phase: focus only on similarity
+            total_reward = -mse_reward
+    else:
+        # Fallback if remaining_episodes wasn't passed
+        total_reward = -mse_reward - aux_reward - edge_reward
     
     total_reward /= 2.0
     return total_reward 
+    # only running it with canny edges loss
+    #return -edge_reward
 
 #def stroke_intersects_edge(start, end, edge_map, threshold=0.8):
 def stroke_intersects_edge(start, end, edge_map):
@@ -105,8 +124,8 @@ def stroke_intersects_edge(start, end, edge_map):
     #return np.mean(values) > threshold
 
     mean_val = np.mean(values)
-   #mean = max(mean_val, 1e-3) # to avoid division by 0 (when avg = 0)
-    reward = ((1 / (mean + 1e-6)) - 1) * 0.01
+    #mean = max(mean_val, 1e-3) # to avoid division by 0 (when avg = 0)
+    reward = ((1 / (mean_val + 1e-6)) - 1) * 0.01
     #print(f"[DEBUG] edge_map mean_val: {mean:.4f}")
     #print(f"[DEBUG] edge_map reward: {reward:.4f}")
     # reward = 1.0 - mean_val

@@ -79,17 +79,18 @@ def update_canvas_torch(canvas: torch.Tensor,
             points.append((y, x))
         if x == x1 and y == y1: #stop the loop once we’ve reached the destination point
             break
-        e2 = 2 * err
-        if e2 > -dy:
+        e2 = 2 * err # consider both x and y directions
+        if e2 > -dy: # if the error is leaning too far in the y-direction, step in x to correct it.
             err -= dy
             x += sx
-        if e2 < dx:
+        if e2 < dx: # if error is leaning too far in the x-direction, step in y to stay close to the ideal line.
             err += dx
             y += sy
 
-    coords = torch.tensor(points, dtype=torch.long, device=device).T  # (2, N)
+    coords = torch.tensor(points, dtype=torch.long, device=device).T  # (2, N) - convert to tensor
 
-    if canvas.ndim == 2 or canvas.shape[0] == 1:
+    # decide the color of the selected pixels and color those pixels on canvas
+    if canvas.ndim == 2 or canvas.shape[0] == 1: #greyscale
         canvas[0, coords[0], coords[1]] = color if isinstance(color, (int, float)) else float(
             0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2])
     else:
