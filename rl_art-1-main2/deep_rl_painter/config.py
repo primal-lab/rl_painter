@@ -18,7 +18,9 @@ config = {
     # painting environment
     "target_image_path": "target_images/target_image_1.jpg",
     #"target_image_path": "target_images/target_image_test.png",
-    "target_edges_path": "canny_edges/target_edges_1.png",  # canny edges of the target image
+    "target_edges_path": "reward_target_versions/target_edges_1.png",  # canny edges of the target image
+    "target_segments_path": "reward_target_versions/segmentation_map.png",  # segmentation_map of the target image
+
     "max_strokes": 2000,                    # max number of strokes per episode
 
     "max_strokes_per_step": 1,               # max number of strokes per step

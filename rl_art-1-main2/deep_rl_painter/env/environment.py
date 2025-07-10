@@ -28,7 +28,7 @@ import time
 class PaintingEnv(gym.Env):
     def __init__(self, target_image_path: str, target_edges_path: str,
              canvas_size: Tuple[int, int], canvas_channels: int,
-             max_strokes: int, device: str, simplified_targets=None):
+             max_strokes: int, device: str, target_segments_path: str, simplified_targets=None):
         """
         Initializes the Painting Environment.
         Args:
@@ -55,6 +55,8 @@ class PaintingEnv(gym.Env):
 
         # target image canny edges
         self.target_edges_path = target_edges_path
+        # target segments image (for reward func)
+        self.target_segments_path = target_segments_path
 
         # removed action space and observation space
         os.makedirs("logs/env", exist_ok=True)
@@ -89,6 +91,13 @@ class PaintingEnv(gym.Env):
         edge_img = cv2.resize(edge_img, (self.canvas_size[1], self.canvas_size[0]))  # W, H
         edge_tensor = torch.tensor(edge_img / 255.0, dtype=torch.float32).to(self.device) # [0.0, 1.0]???
         self.edge_map = edge_tensor  # shape: (H, W)
+
+        # load target_image_1 segments map
+        segemnts_path = self.target_segments_path
+        segments_img = cv2.imread(segemnts_path, cv2.IMREAD_GRAYSCALE) # [0, 255]
+        segments_img = cv2.resize(segments_img, (self.canvas_size[1], self.canvas_size[0]))  # W, H
+        segments_tensor = torch.tensor(segments_img / 255.0, dtype=torch.float32).to(self.device) # [0.0, 1.0]???
+        self.segments_map = segments_tensor  # shape: (H, W)
 
     def load_image(self) -> Union[np.ndarray, torch.Tensor]:
         """
@@ -204,7 +213,7 @@ class PaintingEnv(gym.Env):
                           prev_point=self.prev_point,
                           current_point=self.current_point, 
                           center=self.center, edge_map=self.edge_map, 
-                          remaining_episodes=remaining_episodes)
+                          remaining_episodes=remaining_episodes, segments_map=self.segments_map)
         # t3 = time.time()
         # total1 = t3-t2
         #print("in env.step = Reward:", total1)

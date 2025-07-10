@@ -53,7 +53,8 @@ def train(config):
         canvas_size=config["canvas_size"],
         canvas_channels=config["canvas_channels"],
         max_strokes=config["max_strokes"],
-        device=config["device"]
+        device=config["device"],
+        target_segments_path=config["target_segments_path"]
     )
 
     # dummy_env.target_image = (H, W, C)
@@ -74,7 +75,8 @@ def train(config):
         canvas_channels=config["canvas_channels"],
         max_strokes=config["max_strokes"],
         device=config["device"],
-        simplified_targets=simplified_targets #pass in target_image versions
+        simplified_targets=simplified_targets, #pass in target_image versions
+        target_segments_path=config["target_segments_path"]
     )
 
     # Load target image

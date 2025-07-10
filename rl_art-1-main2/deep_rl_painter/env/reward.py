@@ -35,7 +35,7 @@ TOTAL_EPISODES = config["episodes"]
 #def calculate_reward(current_canvas, target_canvas, device):
 def calculate_reward(current_canvas, target_canvas, device,
                      prev_prev_point, prev_point, current_point, center, 
-                     edge_map=None, remaining_episodes=None):
+                     edge_map=None, remaining_episodes=None, segments_map=None):
     """
     Calculates the reward based on the chosen reward function.
 
@@ -64,19 +64,26 @@ def calculate_reward(current_canvas, target_canvas, device,
     else:
         edge_reward = 0.0
 
-    """#logging MSE and Aux rewards ---
+    # segments reward
+    if segments_map is not None and prev_point is not None and current_point is not None:
+        segment_reward = segments_reward(prev_point, current_point, segments_map)
+    else:
+        segment_reward = 0.0
+
+    #logging MSE and Aux rewards ---
     os.makedirs("logs/debug", exist_ok=True)
     log_file = "logs/debug/reward_breakdown.csv"
 
     with open(log_file, mode="a", newline="") as file:
         writer = csv.writer(file)
         if os.stat(log_file).st_size == 0:  # write header only if file is empty
-            writer.writerow(["mse_reward", "aux_reward", "edges_reward"])
+            writer.writerow(["mse_reward", "aux_reward", "edges_reward", "segment_reward"])
             #writer.writerow(["edges_reward"])
         mse_val = -mse_reward.item()
         aux_val = -aux_reward.item() if isinstance(aux_reward, torch.Tensor) else -aux_reward
         edges_val = -edge_reward
-        writer.writerow([mse_val, aux_val, edges_val])
+        segments_val = -segment_reward
+        writer.writerow([mse_val, aux_val, edges_val, segments_val])
         #writer.writerow([edges_val])
 
     # combine all penalties
@@ -86,8 +93,8 @@ def calculate_reward(current_canvas, target_canvas, device,
     if remaining_episodes is not None:
         #if remaining_episodes > 0.5 * TOTAL_EPISODES:
         if remaining_episodes > 4800: # for first 200 episodes, consider this loss func
-            # Early phase: encourage exploration (big strokes + outline tracing)
-            total_reward = - aux_reward - edge_reward
+            # Early phase: encourage exploration (big strokes + outline tracing + covering the darker areas)
+            total_reward = - aux_reward - edge_reward - segment_reward
         else:
             # Later phase: focus only on similarity
             total_reward = -mse_reward
@@ -99,6 +106,35 @@ def calculate_reward(current_canvas, target_canvas, device,
     return total_reward 
     # only running it with canny edges loss
     #return -edge_reward
+
+def segments_reward(start, end, segments_map):
+    """
+    Computes a penalty for strokes based on how much they overlap with brighter regions
+    in the segmentation map. Encourages filling darker (black) areas first by returning 
+    low values for dark strokes and sharply increasing penalties as more white pixels are covered.
+    """
+    # read the start and end points
+    x1, y1 = int(start[0]), int(start[1])
+    x2, y2 = int(end[0]), int(end[1])
+    # read the shape of the canvas/segments_map
+    H, W = segments_map.shape
+
+    # line gets the pixels containing the stroke on the canvas image
+    rr, cc = skimage_line(y1, x1, y2, x2)  #skimage uses (row, col) = (y, x)
+    # just to make sure the pixels are on the canvas
+    rr = np.clip(rr, 0, H - 1)
+    cc = np.clip(cc, 0, W - 1)
+
+    # read the values of all the selected pixels on the edges image
+    values = segments_map[rr, cc].detach().cpu().numpy()
+    mean_val = np.mean(values)
+
+    # if all pixels are black -> very good stroke => avg = 0 => penalty = 1 * 0.01
+    # the above needs to be encouraged, so everything else will get high reward values
+    # if almost all pixels are white -> bad stroke => avg = 0.9 => penalty = 10 * 0.01
+    penalty = (1 / (1 - mean_val + 1e-6)) * 100 #chnage to 100 or 10?
+    #penalty = [(1 / (1 - mean_val + 1e-6)) * 0.01] - 0.01 # to get p = 0, when perfect stroke (avg=0)
+    return penalty
 
 #def stroke_intersects_edge(start, end, edge_map, threshold=0.8):
 def stroke_intersects_edge(start, end, edge_map):
@@ -124,12 +160,9 @@ def stroke_intersects_edge(start, end, edge_map):
     #return np.mean(values) > threshold
 
     mean_val = np.mean(values)
-    #mean = max(mean_val, 1e-3) # to avoid division by 0 (when avg = 0)
-    reward = ((1 / (mean_val + 1e-6)) - 1) * 0.01
-    #print(f"[DEBUG] edge_map mean_val: {mean:.4f}")
-    #print(f"[DEBUG] edge_map reward: {reward:.4f}")
-    # reward = 1.0 - mean_val
-    return reward
+    stroke_penalty = ((1 / (mean_val + 1e-6)) - 1) * 0.01
+    # if avg = 0 (no intersection w/edges) => 1/1e-6 - 1 = 1000000 - 1 = 999999 *0.01 = 9999.99
+    return stroke_penalty
 
 def calculate_auxiliary_reward(prev_prev_point, prev_point, current_point, center):
     """
