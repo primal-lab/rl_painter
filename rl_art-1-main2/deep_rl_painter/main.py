@@ -21,7 +21,6 @@ from train import train
 import random
 import numpy as np
 
-
 # Set random seeds for reproducibility
 def set_seed(seed):
     random.seed(seed)

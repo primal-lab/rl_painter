@@ -28,8 +28,8 @@ class ReplayBuffer:
         self.buffer.append((canvas, prev_action, action, next_canvas, reward, done))
 
         # logging
-        os.makedirs("logs/debug", exist_ok=True)
-        with open("logs/debug/replay_buffer.log", "a") as f:
+        os.makedirs("logs", exist_ok=True)
+        with open("logs/replay_buffer.log", "a") as f:
             f.write(
                 #f"[ReplayBuffer] canvas.shape={tuple(canvas.shape)}, "
                 f"prev_action=({prev_action[0].item():.6f}, {prev_action[1].item():.6f}), "

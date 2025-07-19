@@ -32,10 +32,13 @@ PREPROCESS = None
 # model, preprocess = None, None
 TOTAL_EPISODES = config["episodes"]
 
-#def calculate_reward(current_canvas, target_canvas, device):
-def calculate_reward(current_canvas, target_canvas, device,
+# Global cache for latent reuse
+CACHED_PREV_LATENT = None
+LAST_EPISODE = -1
+
+def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
                      prev_prev_point, prev_point, current_point, center, 
-                     edge_map=None, remaining_episodes=None, segments_map=None):
+                     edge_map=None, current_episode=None, segments_map=None):
     """
     Calculates the reward based on the chosen reward function.
 
@@ -46,6 +49,80 @@ def calculate_reward(current_canvas, target_canvas, device,
     Returns:
         torch.Tensor: The calculated reward (shape: [batch_size, 1]).
     """
+    # CLIP for calculating cosine similarity
+    global TARGET_LATENT
+    global CACHED_PREV_LATENT, LAST_EPISODE
+
+    if TARGET_LATENT is None:
+        TARGET_LATENT = get_latent_representation(target_canvas, device)
+
+    # Reset cache at the beginning of a new episode
+    if current_episode != LAST_EPISODE:
+        CACHED_PREV_LATENT = get_latent_representation(prev_canvas, device)
+        LAST_EPISODE = current_episode
+
+    current_latent = get_latent_representation(current_canvas, device)
+
+    prev_r = calculate_cosine_similarity(CACHED_PREV_LATENT, TARGET_LATENT)
+    current_r = calculate_cosine_similarity(current_latent, TARGET_LATENT)
+    
+    #print(current_r.shape, prev_r.shape)
+    #total_reward = (current_r - prev_r).mean().item()
+    total_reward = (current_r - prev_r).item()
+
+    # Update cache
+    CACHED_PREV_LATENT = current_latent
+
+    """t0 = time.time()
+    prev_latent = get_latent_representation(prev_canvas, device)
+    t1 = time.time()
+    total1 = t1-t0
+    #print("(in reward.py) prev_latent time: ", total1)
+
+    t2 = time.time()
+    current_latent = get_latent_representation(current_canvas, device)
+    t3 = time.time()
+    total2 = t3-t2
+    #print("(in reward.py) current_latent time: ", total2)
+
+    if TARGET_LATENT is None:
+        TARGET_LATENT = get_latent_representation(target_canvas, device)
+
+    # cosine sim = reward 
+    prev_r = calculate_cosine_similarity(prev_latent, TARGET_LATENT)
+    current_r = calculate_cosine_similarity(current_latent, TARGET_LATENT)
+
+    # less angle, cos sim ≈ 1, better reward
+    total_val = current_r - prev_r 
+    total_reward = total_val.mean().item()"""
+
+
+    # log
+    log_file = "logs/clip_cossim_reward.csv"
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+    with open(log_file, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        if os.stat(log_file).st_size == 0:
+            writer.writerow(["prev canvas cos sim", "current canvas cos sim", "total_reward"])
+        writer.writerow([prev_r.item(), current_r.item(),total_reward])
+    
+    return total_reward 
+
+#def calculate_reward(current_canvas, target_canvas, device):
+"""def calculate_reward(current_canvas, target_canvas, device,
+                     prev_prev_point, prev_point, current_point, center, 
+                     edge_map=None, remaining_episodes=None, segments_map=None):
+    
+    Calculates the reward based on the chosen reward function.
+
+    Args:
+        prev_canvas (torch.Tensor): The previous canvas state (shape: [batch_size, channels, height, width]).
+        current_canvas (torch.Tensor): The current canvas state (shape: [batch_size, channels, height, width]).
+        target_canvas (torch.Tensor): The target canvas state (shape: [batch_size, channels, height, width]).
+    Returns:
+        torch.Tensor: The calculated reward (shape: [batch_size, 1]).
+    
     # CLIP for calculating cosine similarity
     global TARGET_LATENT
     latent = get_latent_representation(current_canvas, device)
@@ -87,7 +164,7 @@ def calculate_reward(current_canvas, target_canvas, device,
         #writer.writerow([edges_val])
 
     # combine all penalties
-    #total_reward = - mse_reward - aux_reward - edge_reward"""
+    #total_reward = - mse_reward - aux_reward - edge_reward
 
     # dynamic reward system 
     if remaining_episodes is not None:
@@ -105,7 +182,7 @@ def calculate_reward(current_canvas, target_canvas, device,
     total_reward /= 2.0
     return total_reward 
     # only running it with canny edges loss
-    #return -edge_reward
+    #return -edge_reward"""
 
 def segments_reward(start, end, segments_map):
     """

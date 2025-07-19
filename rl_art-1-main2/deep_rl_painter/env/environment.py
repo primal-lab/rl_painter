@@ -145,7 +145,7 @@ class PaintingEnv(gym.Env):
         #!return torch.tensor(img).unsqueeze(0).to(self.device)  # [1, C, H, W]
         return torch.tensor(img, device=self.device).unsqueeze(0)
 
-    def step(self, action, remaining_episodes=None):
+    def step(self, action, current_episode=None):
         """
         Takes a step in the environment using the given action.
         The action is a 2D vector representing the direction of the stroke.
@@ -174,11 +174,11 @@ class PaintingEnv(gym.Env):
             self.center[0] + unit_vector[0] * self.radius,
             self.center[1] + unit_vector[1] * self.radius], dtype=np.float32)
 
-        # t0 = time.time()
+        t0 = time.time()
         # self.canvas is (H, W, C)
         self.canvas = update_canvas(self.canvas, tuple(self.current_point), tuple(next_point))
-        # t1 = time.time()
-        # total = t1-t0
+        t1 = time.time()
+        total = t1-t0
         #print("(in env.step) Rendering Time: ", total)
         self.used_strokes += 1
 
@@ -193,30 +193,30 @@ class PaintingEnv(gym.Env):
         #self.current_point = next_point
         
         # Compute reward
-        prev_tensor = self.to_tensor(prev_canvas) # not being used
+        prev_tensor = self.to_tensor(prev_canvas) 
         current_tensor = self.to_tensor(self.canvas)
         # self.target_image = (H, W, C)
         # target_tensor = (B, H, W, C)
-        #target_tensor = self.to_tensor(self.target_image)
+        target_tensor = self.to_tensor(self.target_image)
 
         # select the right simplified target version (out of 10) based on stroke count
-        stage_idx = min(9, self.used_strokes // 200)
+        #stage_idx = min(9, self.used_strokes // 200)
         # simplified_targets[stage_idx] = (B, C, H, W)
         # target_tensor = (B, H, W, C)
-        target_tensor = self.simplified_targets[stage_idx].permute(0, 2, 3, 1).to(self.device)
+        #target_tensor = self.simplified_targets[stage_idx].permute(0, 2, 3, 1).to(self.device)
 
         # reward is a tensor here
-        # t2 = time.time()
+        t2 = time.time()
         #reward = calculate_reward(current_tensor, target_tensor, device=self.device)
-        reward = calculate_reward(current_tensor, target_tensor, device=self.device,
+        reward = calculate_reward(prev_tensor, current_tensor, target_tensor, device=self.device,
                           prev_prev_point=self.prev_prev_point,
                           prev_point=self.prev_point,
                           current_point=self.current_point, 
                           center=self.center, edge_map=self.edge_map, 
-                          remaining_episodes=remaining_episodes, segments_map=self.segments_map)
-        # t3 = time.time()
-        # total1 = t3-t2
-        #print("in env.step = Reward:", total1)
+                          current_episode=current_episode, segments_map=self.segments_map)
+        t3 = time.time()
+        total1 = t3-t2
+        #print("(in env.step)Reward Time:", total1)
         done = self.used_strokes >= self.max_strokes
         
         # the line below was used create the next state representation for the agent, to save in replay buffer 

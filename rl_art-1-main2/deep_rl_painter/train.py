@@ -35,7 +35,9 @@ import glob
 import re
 from utils.simplified_targets import generate_simplified_targets
 import cv2
-
+import wandb
+#from utils.wandb_logging import start_visual_logging, log_canvas_step, log_canvas_video_and_table
+from utils.wandb_logging import log_canvas_video, log_step_to_table
 
 def train(config):
     """
@@ -45,9 +47,16 @@ def train(config):
     Args:
         config (dict): Configuration dictionary containing hyperparameters and paths.
     """
+
+    wandb.init(
+        project="ddpg-painter",             
+        name="run-1",               
+        config=config              
+    )
+
     # create dummy env to access target_image 
     # to pass into generate_simplified_targets
-    dummy_env = PaintingEnv(
+    """dummy_env = PaintingEnv(
         target_image_path=config["target_image_path"],
         target_edges_path=config["target_edges_path"],
         canvas_size=config["canvas_size"],
@@ -64,8 +73,8 @@ def train(config):
     # generate simplified versions once
     simplified_targets = generate_simplified_targets(
         target_image,
-        save_dir="logs/debug/target_versions"
-    )
+        save_dir="logs/target_versions"
+    )"""
 
     # Initialize (actual/real) environment here and load target image
     env = PaintingEnv(
@@ -75,14 +84,14 @@ def train(config):
         canvas_channels=config["canvas_channels"],
         max_strokes=config["max_strokes"],
         device=config["device"],
-        simplified_targets=simplified_targets, #pass in target_image versions
+        #simplified_targets=simplified_targets, #pass in target_image versions
         target_segments_path=config["target_segments_path"]
     )
 
     # Load target image
     # env.target_image = (H, W, C)
     # target_image = (B, C, H, W)
-    #target_image = torch.from_numpy(env.target_image).permute(2, 0, 1).unsqueeze(0).float().to(config["device"])
+    target_image = torch.from_numpy(env.target_image).permute(2, 0, 1).unsqueeze(0).float().to(config["device"])
 
     # Initialize Actor & Critic networks (main and target)
     actor = Actor(
@@ -211,8 +220,13 @@ def train(config):
     ) as prof:
         # from last saved episode, run 50,000 more episodes
         for episode in range(start_episode, start_episode + config["episodes"]):
-    # Main training loop
-    #for episode in range(config["episodes"]):
+
+            # w and b
+            global_step = 0
+            episode_frames = []
+            episode_table = wandb.Table(columns=["Step", "Reward", "Canvas"])
+            #start_visual_logging(episode)
+
             canvas = env.reset() # canvas = (H, W, C) tensor
             # random initial point is set above in env.reset
             prev_action = np.zeros(config["action_dim"], dtype=np.float32)
@@ -276,11 +290,11 @@ def train(config):
                 
                 # actor_prev_input = (2,) -> later converted to tensor and (2,1) in select_action()
                 # action is here numpy array (6,)
-                # t0 = time.time()
+                t0 = time.time()
                 action = agent.act(canvas_tensor, target_image, actor_prev_input, noise_scale)
-                # t1 = time.time()
-                # total = t1-t0
-                # print("Action Time: ", total)
+                t1 = time.time()
+                total = t1-t0
+                #print("(in train.py) Action Time: ", total)
 
                 # Logs action values per step
                 """with open("logs/action_logs.csv", "a", newline="") as file:
@@ -291,21 +305,17 @@ def train(config):
 
                 # Apply action in the environment
                 # actor_current_input contains the current action's normalised x,y values
-                # t2 = time.time()
-                remaining_episodes = config["episodes"] - episode
-                next_canvas, reward, done, actor_current_input = env.step(action, remaining_episodes=remaining_episodes)
-                # t3 = time.time()
-                # total1 = t3-t2
-                # print("Rendering Time: ", total1)
+                t2 = time.time()
+                current_episode = episode
+                next_canvas, reward, done, actor_current_input = env.step(action, current_episode=current_episode)
+                t3 = time.time()
+                total1 = t3-t2
+                #print("(in train.py) Rendering Time: ", total1)
                 # #print(f"Action: {action}")
                 #print(f"Actor Current Input (x, y): {actor_current_input}")
 
-                # Logs environment transitions including shapes and rewards
-                """with open("logs/env_transitions.log", "a") as f:
-                    f.write(f"Episode {episode + 1}, Step {env.used_strokes}:\n")
-                    f.write(f"Action taken: {action.tolist()}\n")
-                    f.write(f"Reward: {reward}, Done: {done}\n")
-                    f.write(f"Canvas shape: {canvas.shape}, Next canvas shape: {next_canvas.shape}\n\n")"""
+                # w and b
+                #log_canvas_step(canvas, reward, env.used_strokes, episode)
 
                 # next_canvas from env.step = (C, H, W)
                 # canvas_tensor = (B, C, H, W)
@@ -363,7 +373,28 @@ def train(config):
                 # canvas = (B, C, H, W)
                 # canvas_tensor = (B, C, H, W)
                 canvas = canvas_tensor
-                
+
+                # w and b
+                #episode_frames.append(canvas[0].clone())
+                #log_step_to_table(episode_table, env.used_strokes+1, reward, canvas[0])
+                # Process frame once for both video & table
+                img = canvas[0].detach().cpu().permute(1, 2, 0).numpy()
+                img = np.clip(img, 0, 255).astype(np.uint8)
+                img = 255 - img  # same inversion as save_canvas
+                # Squeeze to (H, W) for video (GIF-friendly)
+                if img.ndim == 3 and img.shape[2] == 1:
+                    video_frame = img.squeeze(axis=2)
+                else:
+                    video_frame = img
+                # Append to episode_frames (used for video)
+                episode_frames.append(video_frame)
+                # Table still needs (C, H, W) torch tensor
+                # If squeezed, re-add dummy channel for table consistency
+                if img.ndim == 2:
+                    img = img[:, :, np.newaxis]
+                tensor_for_table = torch.from_numpy(img).permute(2, 0, 1)
+                log_step_to_table(episode_table, env.used_strokes + 1, reward, tensor_for_table)
+
                 # Save 1st episode's and every 10th episode's final step (2000th step)
                 if ((episode + 1) == 1 or (episode + 1) % 10 == 0) and env.used_strokes == config["max_strokes"] - 1:
                     step_dir = f"step_outputs/episode_{episode + 1}"
@@ -385,16 +416,29 @@ def train(config):
                     canvas_to_save = canvas_to_save.permute(1, 2, 0).contiguous()  # → (H, W, C)
                     save_canvas(canvas_to_save, save_path)
                 prev_action = action
-                episode_reward += reward.item() #just assigning the float value
+                #episode_reward += reward.item() #just assigning the float value
+                episode_reward += reward
 
                 # Log step reward
                 with open("logs/step_rewards.csv", mode="a", newline="") as file:
                     writer = csv.writer(file)
                     if episode == 0 and env.used_strokes == 1:  # write header only once
                         writer.writerow(["episode", "step", "reward"])
-                    writer.writerow([episode + 1, env.used_strokes, reward.item()])
+                    #writer.writerow([episode + 1, env.used_strokes, reward.item()])
+                    writer.writerow([episode + 1, env.used_strokes, reward])
                 print(f"Episode {episode + 1} | Step {env.used_strokes} | Step Reward: {reward}")
+                
+                wandb.log({
+                    "Step vs Reward (all episodes)": reward,
+                    #"Global Step": global_step
+                })
+                global_step += 1
 
+
+            # w and b
+            #log_canvas_video_and_table(episode)
+            log_canvas_video(episode, episode_frames, fps=15)
+            wandb.log({f"Episode_{episode + 1}_Step_Table": episode_table})
 
             # Decay exploration noise every 20 episodes
             if (episode + 1) % 20 == 0:
@@ -436,4 +480,9 @@ def train(config):
                         f"trained_models/critic_{episode + 1}.pth")
                 print(f"Saved model at episode {episode + 1}")
 
+            wandb.log({
+                "Episode vs Reward": episode_reward,
+                "Episode": episode + 1
+            })
+            
         print("Training complete.")
