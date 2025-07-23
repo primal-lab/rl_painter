@@ -24,6 +24,7 @@ from .reward import calculate_reward
 import pdb
 from typing import Tuple, Union
 import time
+from config import config
 
 class PaintingEnv(gym.Env):
     def __init__(self, target_image_path: str, target_edges_path: str,
@@ -57,12 +58,14 @@ class PaintingEnv(gym.Env):
         self.target_edges_path = target_edges_path
         # target segments image (for reward func)
         self.target_segments_path = target_segments_path
-
-        # removed action space and observation space
-        os.makedirs("logs/env", exist_ok=True)
-
         # simplified versions of the target_image
         self.simplified_targets = simplified_targets
+        
+        # number of nails on the circle
+        self.n_nails = config["nails"]
+
+        # removed action space and observation space
+        #os.makedirs("logs/env", exist_ok=True)
 
         self._initialize()
 
@@ -82,7 +85,7 @@ class PaintingEnv(gym.Env):
         # initialize point history
         self.prev_prev_point = None
         self.prev_point = None
-        self.current_point = self.random_circle_point()
+        #self.current_point = self.random_circle_point()
         self.used_strokes = 0
 
         # load target_image_1 canny edge map
@@ -98,6 +101,11 @@ class PaintingEnv(gym.Env):
         segments_img = cv2.resize(segments_img, (self.canvas_size[1], self.canvas_size[0]))  # W, H
         segments_tensor = torch.tensor(segments_img / 255.0, dtype=torch.float32).to(self.device) # [0.0, 1.0]???
         self.segments_map = segments_tensor  # shape: (H, W)
+
+        # generating nails on the circle
+        self.nails = self.generate_nails(self.n_nails)
+        # start at a random point (goes into point history)
+        self.current_idx = np.random.randint(0, self.n_nails)
 
     def load_image(self) -> Union[np.ndarray, torch.Tensor]:
         """
@@ -145,11 +153,94 @@ class PaintingEnv(gym.Env):
         #!return torch.tensor(img).unsqueeze(0).to(self.device)  # [1, C, H, W]
         return torch.tensor(img, device=self.device).unsqueeze(0)
 
-    def step(self, action, current_episode=None):
+    def generate_nails(self, n_nails: int):
+        """
+        Generate fixed points (nails) evenly spaced on a circular boundary.
+
+        Args:
+            n_nails (int): Number of nails to place around the circle.
+
+        Returns:
+            list: List of (x, y) integer tuples representing nail positions.
+        """
+        # numpy.linspace - returns evenly spaced numbers over a specified interval
+        # if endpoint = true, 2pi will be one of the points, but not needed as 0 is already considered
+        # n_nails = number of evenly spaced numbers to be generated
+        angles = np.linspace(0, 2 * np.pi, n_nails, endpoint=False)
+        
+        # marking the points on the circumference, acc to the angles generated
+        nail_positions = []
+        for a in angles:
+            x = int(self.center[0] + self.radius * np.cos(a))
+            y = int(self.center[1] + self.radius * np.sin(a))
+            nail_positions.append((x, y))
+        
+        # [(x1, y1), (x2, y2), ...]
+        return nail_positions   
+
+    def step(self, action_idx, current_episode=None, current_step=None):
         """
         Takes a step in the environment using the given action.
-        The action is a 2D vector representing the direction of the stroke.
-        The reward is calculated based on the difference between the current canvas and the target image.
+        The action is the index of the next nail to connect to.
+        Draws a line between the current nail and the chosen next nail.
+
+        Args:
+            action_idx (int): The index of the next nail (0 to n_nails-1).
+        Returns:
+            canvas (C, H, W), reward (float), done (bool), next_idx (int)
+        """
+
+        prev_canvas = self.canvas.clone()
+        start_point = self.nails[self.current_idx]
+        end_point = self.nails[action_idx]
+
+        self.canvas = update_canvas(
+            self.canvas,
+            start_point,
+            end_point,
+            channels=self.channels # add color and width later
+        )
+
+        self.used_strokes += 1
+        next_idx = action_idx
+
+        # update point history (used in reward) 
+        self.prev_prev_point = self.prev_point
+        self.prev_point = self.nails[self.current_idx]
+        self.current_idx = next_idx
+
+        # compute reward 
+        prev_tensor = self.to_tensor(prev_canvas)
+        current_tensor = self.to_tensor(self.canvas)
+        target_tensor = self.to_tensor(self.target_image)
+
+        reward = calculate_reward(
+            prev_tensor, current_tensor, target_tensor, device=self.device,
+            prev_prev_point=self.prev_prev_point,
+            prev_point=self.prev_point,
+            current_point=self.nails[self.current_idx],
+            center=self.center,
+            edge_map=self.edge_map,
+            current_episode=current_episode, current_step=current_step,
+            segments_map=self.segments_map
+        )
+
+        done = self.used_strokes >= self.max_strokes
+
+        # return (C, H, W) & next index 
+        canvas_to_return = (
+            self.canvas.permute(2, 0, 1).contiguous()
+            if isinstance(self.canvas, torch.Tensor)
+            else np.transpose(self.canvas, (2, 0, 1))
+        )
+        return canvas_to_return, reward, done, next_idx
+        
+
+    """def step(self, action, current_episode=None, current_step=None):
+        """
+        #Takes a step in the environment using the given action.
+        #The action is a 2D vector representing the direction of the stroke.
+        #The reward is calculated based on the difference between the current canvas and the target image.
         """
         
         # self.canvas = prev_canvas = (H, W, C)
@@ -213,7 +304,8 @@ class PaintingEnv(gym.Env):
                           prev_point=self.prev_point,
                           current_point=self.current_point, 
                           center=self.center, edge_map=self.edge_map, 
-                          current_episode=current_episode, segments_map=self.segments_map)
+                          current_episode=current_episode, current_step=current_step, 
+                          segments_map=self.segments_map)
         t3 = time.time()
         total1 = t3-t2
         #print("(in env.step)Reward Time:", total1)
@@ -232,7 +324,7 @@ class PaintingEnv(gym.Env):
         else:
             canvas_to_return = np.transpose(canvas_to_return, (2, 0, 1))       # (C, H, W)
         return canvas_to_return, reward, done, next_point
-
+    """
 
     def reset(self):
         """
@@ -241,7 +333,7 @@ class PaintingEnv(gym.Env):
             canvas (numpy.ndarray): The initial canvas state.
         """
         self._initialize()
-        return self.canvas
+        return self.canvas, self.current_idx
 
     # def render(self, mode='human'):
     #     cv2.imshow('Canvas', self.canvas)

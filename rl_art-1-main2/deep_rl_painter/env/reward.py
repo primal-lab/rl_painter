@@ -38,7 +38,7 @@ LAST_EPISODE = -1
 
 def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
                      prev_prev_point, prev_point, current_point, center, 
-                     edge_map=None, current_episode=None, segments_map=None):
+                     edge_map=None, current_episode=None, current_step=None, segments_map=None):
     """
     Calculates the reward based on the chosen reward function.
 
@@ -65,10 +65,21 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
 
     prev_r = calculate_cosine_similarity(CACHED_PREV_LATENT, TARGET_LATENT)
     current_r = calculate_cosine_similarity(current_latent, TARGET_LATENT)
-    
-    #print(current_r.shape, prev_r.shape)
-    #total_reward = (current_r - prev_r).mean().item()
-    total_reward = (current_r - prev_r).item()
+
+    # brightness reward
+    if target_canvas is not None and prev_point is not None and current_point is not None:
+        segment_reward = segments_reward(prev_point, current_point, target_canvas)
+    else:
+        segment_reward = 0.0
+
+    brightness_scale = 0.1    
+
+    # dynamic reward fucntion
+    # encourage strokes in darker (less bright) regions initially, then focus on just similarity
+    if current_step is not None and current_step < 500:
+        total_reward = (current_r - prev_r).item() + brightness_scale * segment_reward
+    else:   
+        total_reward = (current_r - prev_r).item()
 
     # Update cache
     CACHED_PREV_LATENT = current_latent
@@ -96,16 +107,14 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
     total_val = current_r - prev_r 
     total_reward = total_val.mean().item()"""
 
-
     # log
-    log_file = "logs/clip_cossim_reward.csv"
+    log_file = "logs/reward_breakdown.csv"
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
-
     with open(log_file, mode="a", newline="") as file:
         writer = csv.writer(file)
         if os.stat(log_file).st_size == 0:
-            writer.writerow(["prev canvas cos sim", "current canvas cos sim", "total_reward"])
-        writer.writerow([prev_r.item(), current_r.item(),total_reward])
+            writer.writerow(["prev canvas cos sim", "current canvas cos sim", "clip/cosine reward", "brightness reward", "total_reward"])
+        writer.writerow([prev_r.item(), current_r.item(), (current_r - prev_r).item(), segment_reward, total_reward])
     
     return total_reward 
 
@@ -184,7 +193,8 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
     # only running it with canny edges loss
     #return -edge_reward"""
 
-def segments_reward(start, end, segments_map):
+#def segments_reward(start, end, segments_map):
+def segments_reward(start, end, target_canvas):
     """
     Computes a penalty for strokes based on how much they overlap with brighter regions
     in the segmentation map. Encourages filling darker (black) areas first by returning 
@@ -193,8 +203,15 @@ def segments_reward(start, end, segments_map):
     # read the start and end points
     x1, y1 = int(start[0]), int(start[1])
     x2, y2 = int(end[0]), int(end[1])
-    # read the shape of the canvas/segments_map
-    H, W = segments_map.shape
+    
+    # Ensure (H, W)
+    if target_canvas.ndim == 4:
+        target_canvas = target_canvas.squeeze(0).squeeze(-1)  # (H, W)
+    elif target_canvas.ndim == 3 and target_canvas.shape[0] == 1:
+        target_canvas = target_canvas.squeeze(0)  # (H, W)
+
+    # read the shape of the canvas/segments_map    
+    H, W = target_canvas.shape
 
     # line gets the pixels containing the stroke on the canvas image
     rr, cc = skimage_line(y1, x1, y2, x2)  #skimage uses (row, col) = (y, x)
@@ -203,15 +220,21 @@ def segments_reward(start, end, segments_map):
     cc = np.clip(cc, 0, W - 1)
 
     # read the values of all the selected pixels on the edges image
-    values = segments_map[rr, cc].detach().cpu().numpy()
-    mean_val = np.mean(values)
+    values = target_canvas[rr, cc].detach().cpu().numpy()
+    # normalise to [0.0, 1.0]
+    if values.max() > 1.0:
+        values = values / 255.0
+    mean_val = np.mean(values) # range -> [0.0, 1.0]
 
     # if all pixels are black -> very good stroke => avg = 0 => penalty = 1 * 0.01
     # the above needs to be encouraged, so everything else will get high reward values
     # if almost all pixels are white -> bad stroke => avg = 0.9 => penalty = 10 * 0.01
-    penalty = (1 / (1 - mean_val + 1e-6)) * 100 #chnage to 100 or 10?
-    #penalty = [(1 / (1 - mean_val + 1e-6)) * 0.01] - 0.01 # to get p = 0, when perfect stroke (avg=0)
-    return penalty
+    #penalty = (1 / (1 - mean_val + 1e-6)) * 100 #chnage to 100 or 10?
+    # penalty = [(1 / (1 - mean_val + 1e-6)) * 0.01] - 0.01 # to get p = 0, when perfect stroke (avg=0)
+    #return penalty
+
+    reward = 1.0 - mean_val     # 0 → 1 (darker = high reward, brighter = low reward)
+    return reward
 
 #def stroke_intersects_edge(start, end, edge_map, threshold=0.8):
 def stroke_intersects_edge(start, end, edge_map):

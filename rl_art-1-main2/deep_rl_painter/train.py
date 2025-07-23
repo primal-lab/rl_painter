@@ -50,7 +50,7 @@ def train(config):
 
     wandb.init(
         project="ddpg-painter",             
-        name="run-1",               
+        name="run-2",               
         config=config              
     )
 
@@ -307,7 +307,7 @@ def train(config):
                 # actor_current_input contains the current action's normalised x,y values
                 t2 = time.time()
                 current_episode = episode
-                next_canvas, reward, done, actor_current_input = env.step(action, current_episode=current_episode)
+                next_canvas, reward, done, actor_current_input = env.step(action, current_episode=current_episode, current_step=env.used_strokes)
                 t3 = time.time()
                 total1 = t3-t2
                 #print("(in train.py) Rendering Time: ", total1)

@@ -14,6 +14,7 @@ config = {
     "seed": 42,
 
     "episodes": 5000,                        # change to 500 or more later
+    "nails": 180,                            # number of nails
 
     # painting environment
     "target_image_path": "target_images/target_image_1.jpg",
