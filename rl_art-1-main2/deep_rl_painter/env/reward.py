@@ -38,8 +38,10 @@ TOTAL_EPISODES = config["episodes"]
 CACHED_PREV_LATENT = None
 LAST_EPISODE = -1
 
+# currently getting 3 index values
+# need the 3 (x,y) point values to use other aux functions
 def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
-                     prev_prev_point, prev_point, current_point, center, 
+                     prev_prev_idx, prev_idx, current_idx, center, 
                      edge_map=None, current_episode=None, current_step=None, segments_map=None):
     """
     Calculates the reward based on the chosen reward function.
@@ -88,31 +90,10 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
     else:   
         total_reward = (current_r - prev_r).item() # range = [-2, 2]
 
+
+
     # Update cache
     CACHED_PREV_LATENT = current_latent
-
-    """t0 = time.time()
-    prev_latent = get_latent_representation(prev_canvas, device)
-    t1 = time.time()
-    total1 = t1-t0
-    #print("(in reward.py) prev_latent time: ", total1)
-
-    t2 = time.time()
-    current_latent = get_latent_representation(current_canvas, device)
-    t3 = time.time()
-    total2 = t3-t2
-    #print("(in reward.py) current_latent time: ", total2)
-
-    if TARGET_LATENT is None:
-        TARGET_LATENT = get_latent_representation(target_canvas, device)
-
-    # cosine sim = reward 
-    prev_r = calculate_cosine_similarity(prev_latent, TARGET_LATENT)
-    current_r = calculate_cosine_similarity(current_latent, TARGET_LATENT)
-
-    # less angle, cos sim ≈ 1, better reward
-    total_val = current_r - prev_r 
-    total_reward = total_val.mean().item()"""
 
     # log
     log_file = "logs/reward_breakdown.csv"
@@ -124,81 +105,6 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
         writer.writerow([prev_r.item(), current_r.item(), (current_r - prev_r).item(), segment_reward, total_reward])
     
     return total_reward 
-
-#def calculate_reward(current_canvas, target_canvas, device):
-"""def calculate_reward(current_canvas, target_canvas, device,
-                     prev_prev_point, prev_point, current_point, center, 
-                     edge_map=None, remaining_episodes=None, segments_map=None):
-    
-    Calculates the reward based on the chosen reward function.
-
-    Args:
-        prev_canvas (torch.Tensor): The previous canvas state (shape: [batch_size, channels, height, width]).
-        current_canvas (torch.Tensor): The current canvas state (shape: [batch_size, channels, height, width]).
-        target_canvas (torch.Tensor): The target canvas state (shape: [batch_size, channels, height, width]).
-    Returns:
-        torch.Tensor: The calculated reward (shape: [batch_size, 1]).
-    
-    # CLIP for calculating cosine similarity
-    global TARGET_LATENT
-    latent = get_latent_representation(current_canvas, device)
-    if TARGET_LATENT is None:
-        TARGET_LATENT = get_latent_representation(target_canvas, device)
-
-    mse_score_current = mse_loss(latent, TARGET_LATENT) # current_canvas - this mse needs to be lower
-    mse_reward = mse_score_current * 10
-
-    # auxiliary reward - modified
-    aux_reward = calculate_auxiliary_reward(prev_prev_point, prev_point, current_point, center)
-
-    # compute edge-based reward (penalty or bonus)
-    if edge_map is not None and prev_point is not None and current_point is not None:
-        edge_reward = stroke_intersects_edge(prev_point, current_point, edge_map)
-    else:
-        edge_reward = 0.0
-
-    # segments reward
-    if segments_map is not None and prev_point is not None and current_point is not None:
-        segment_reward = segments_reward(prev_point, current_point, segments_map)
-    else:
-        segment_reward = 0.0
-
-    #logging MSE and Aux rewards ---
-    os.makedirs("logs/debug", exist_ok=True)
-    log_file = "logs/debug/reward_breakdown.csv"
-
-    with open(log_file, mode="a", newline="") as file:
-        writer = csv.writer(file)
-        if os.stat(log_file).st_size == 0:  # write header only if file is empty
-            writer.writerow(["mse_reward", "aux_reward", "edges_reward", "segment_reward"])
-            #writer.writerow(["edges_reward"])
-        mse_val = -mse_reward.item()
-        aux_val = -aux_reward.item() if isinstance(aux_reward, torch.Tensor) else -aux_reward
-        edges_val = -edge_reward
-        segments_val = -segment_reward
-        writer.writerow([mse_val, aux_val, edges_val, segments_val])
-        #writer.writerow([edges_val])
-
-    # combine all penalties
-    #total_reward = - mse_reward - aux_reward - edge_reward
-
-    # dynamic reward system 
-    if remaining_episodes is not None:
-        #if remaining_episodes > 0.5 * TOTAL_EPISODES:
-        if remaining_episodes > 4800: # for first 200 episodes, consider this loss func
-            # Early phase: encourage exploration (big strokes + outline tracing + covering the darker areas)
-            total_reward = - aux_reward - edge_reward - segment_reward
-        else:
-            # Later phase: focus only on similarity
-            total_reward = -mse_reward
-    else:
-        # Fallback if remaining_episodes wasn't passed
-        total_reward = -mse_reward - aux_reward - edge_reward
-    
-    total_reward /= 2.0
-    return total_reward 
-    # only running it with canny edges loss
-    #return -edge_reward"""
 
 #def segments_reward(start, end, segments_map):
 def segments_reward(start, end, target_canvas):

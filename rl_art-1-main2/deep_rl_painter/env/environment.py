@@ -193,12 +193,12 @@ class PaintingEnv(gym.Env):
         Args:
             action_idx (int): The index of the next nail (0 to n_nails-1).
         Returns:
-            canvas (C, H, W), reward (float), done (bool), next_idx (int)
+            canvas (C, H, W), reward (float), done (bool)
         """
 
         prev_canvas = self.canvas.clone()
-        start_point = self.nails[self.current_idx]
-        end_point = self.nails[action_idx]
+        start_point = self.nails[self.current_idx] # x,y
+        end_point = self.nails[action_idx] # x,y
 
         t0 = time.time()
         self.canvas = update_canvas(
@@ -212,12 +212,13 @@ class PaintingEnv(gym.Env):
         print("(in env.step) Update Canvas Time: ", total)
 
         self.used_strokes += 1
-        next_idx = action_idx
 
-        # update point history (used in reward) 
-        self.prev_prev_point = self.prev_point
-        self.prev_point = self.nails[self.current_idx]
-        self.current_idx = next_idx
+        # update point history (used in reward)
+        # int values (indices) as of now
+        # do self.nails[self.current_idx] to get x,y values
+        self.prev_prev_idx = self.prev_idx
+        self.prev_idx = prev_idx
+        self.current_idx = action_idx
 
         # compute reward 
         prev_tensor = self.to_tensor(prev_canvas)
@@ -225,11 +226,13 @@ class PaintingEnv(gym.Env):
         target_tensor = self.to_tensor(self.target_image)
 
         t2 = time.time()
+        # passing in 3 index values as of now. (prev_prev not needed)
+        # need to pass in 3 (x,y) values as well, if needed to use other aux reward functions
         reward = calculate_reward(
             prev_tensor, current_tensor, target_tensor, device=self.device,
-            prev_prev_point=self.prev_prev_point,
-            prev_point=self.prev_point,
-            current_point=self.nails[self.current_idx],
+            prev_prev_idx=self.prev_prev_idx, # not really needed
+            prev_idx=self.prev_idx,
+            current_idx=self.current_idx,
             center=self.center,
             edge_map=self.edge_map,
             current_episode=current_episode, current_step=current_step,
@@ -247,7 +250,7 @@ class PaintingEnv(gym.Env):
             if isinstance(self.canvas, torch.Tensor)
             else np.transpose(self.canvas, (2, 0, 1))
         )
-        return canvas_to_return, reward, done, next_idx
+        return canvas_to_return, reward, done
         
 
     """def step(self, action, current_episode=None, current_step=None):

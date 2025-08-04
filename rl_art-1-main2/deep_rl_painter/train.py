@@ -311,7 +311,7 @@ def train(config):
                 t2 = time.time()
                 current_episode = episode
                 #next_canvas, reward, done, actor_current_input = env.step(action, current_episode=current_episode, current_step=env.used_strokes)
-                next_canvas, reward, done, next_idx = env.step(action_idx, current_episode=episode, current_step=env.used_strokes)
+                next_canvas, reward, done = env.step(action_idx, current_episode=episode, current_step=env.used_strokes)
                 t3 = time.time()
                 total1 = t3-t2
                 print("(in train.py) Rendering Time: ", total1)
