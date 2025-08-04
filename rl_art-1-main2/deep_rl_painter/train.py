@@ -50,7 +50,7 @@ def train(config):
 
     wandb.init(
         project="ddpg-painter",             
-        name="run-2",               
+        name="run-3",               
         config=config              
     )
 
@@ -97,28 +97,28 @@ def train(config):
     actor = Actor(
         image_encoder_model=config["model_name"],
         #actor_network_input=config["action_dim"],
-        actor_network_input=2, # x,y
+        actor_network_input=config["nails"], # one-hot vector of the prev point
         in_channels=config["canvas_channels"],
-        out_neurons=config["action_dim"]
+        out_neurons=config["nails"]+5  # next point probs (softmax) + r,g,b,w,o
     )
     critic = Critic(
         image_encoder_model=config["model_name"],
         #actor_network_input=config["action_dim"]*2,
-        actor_network_input=4,
+        actor_network_input=config["nails"], # one-hot vector of the current point
         in_channels=config["canvas_channels"],
         out_neurons=1
     )
     actor_target = Actor(
         image_encoder_model=config["model_name"],
         #actor_network_input=config["action_dim"],
-        actor_network_input=2, # x,y
-        out_neurons=config["action_dim"],
-        in_channels=config["canvas_channels"]
+        actor_network_input=config["nails"], 
+        in_channels=config["canvas_channels"],
+        out_neurons=config["nails"]+5
     )
     critic_target = Critic(
         image_encoder_model=config["model_name"],
         #actor_network_input=config["action_dim"]*2,
-        actor_network_input=4,
+        actor_network_input=config["nails"],
         in_channels=config["canvas_channels"],
         out_neurons=1
     )
@@ -227,15 +227,17 @@ def train(config):
             episode_table = wandb.Table(columns=["Step", "Reward", "Canvas"])
             #start_visual_logging(episode)
 
-            canvas = env.reset() # canvas = (H, W, C) tensor
-            # random initial point is set above in env.reset
+            #canvas = env.reset() 
+            canvas, current_idx = env.reset() # canvas = (H, W, C) tensor
+            
+            """# random initial point is set above in env.reset
             prev_action = np.zeros(config["action_dim"], dtype=np.float32)
             # Initialize previous action with current point
             prev_action[0] = env.current_point[0]
             prev_action[1] = env.current_point[1]
             # Send only (x, y) point to the Actor
             prev_point = prev_action[:2].copy()
-            first_step = True  # Flag to check for first loop
+            first_step = True  # Flag to check for first loop"""
 
             # Logs input tensor shapes at the start of each episode
             """with open("logs/input_shapes.log", "a") as f:
@@ -270,7 +272,7 @@ def train(config):
             while not done:
 
                 # Prepare actor input from previous point
-                if first_step:
+                """if first_step:
                     actor_prev_input = prev_point  # already a point on circle (from env.current_point -> env.random_circle_point)
                     first_step = False  # flip the flag
                 else: # to get x,y on the circle, instead of raw directional x,y
@@ -279,7 +281,7 @@ def train(config):
                     unit_vector = direction / norm
                     actor_prev_input = np.array([
                         env.center[0] + unit_vector[0] * env.radius,
-                        env.center[1] + unit_vector[1] * env.radius], dtype=np.float32)
+                        env.center[1] + unit_vector[1] * env.radius], dtype=np.float32)"""
 
                 #print(f"Prev Action: {prev_action}")
                 #print(f"Actor Prev Input : {actor_prev_input}")
@@ -291,10 +293,11 @@ def train(config):
                 # actor_prev_input = (2,) -> later converted to tensor and (2,1) in select_action()
                 # action is here numpy array (6,)
                 t0 = time.time()
-                action = agent.act(canvas_tensor, target_image, actor_prev_input, noise_scale)
+                #action = agent.act(canvas_tensor, target_image, actor_prev_input, noise_scale)
+                action_idx = agent.act(canvas_tensor, target_image, current_idx, noise_scale)
                 t1 = time.time()
                 total = t1-t0
-                #print("(in train.py) Action Time: ", total)
+                print("(in train.py) Action Time: ", total)
 
                 # Logs action values per step
                 """with open("logs/action_logs.csv", "a", newline="") as file:
@@ -307,10 +310,11 @@ def train(config):
                 # actor_current_input contains the current action's normalised x,y values
                 t2 = time.time()
                 current_episode = episode
-                next_canvas, reward, done, actor_current_input = env.step(action, current_episode=current_episode, current_step=env.used_strokes)
+                #next_canvas, reward, done, actor_current_input = env.step(action, current_episode=current_episode, current_step=env.used_strokes)
+                next_canvas, reward, done, next_idx = env.step(action_idx, current_episode=episode, current_step=env.used_strokes)
                 t3 = time.time()
                 total1 = t3-t2
-                #print("(in train.py) Rendering Time: ", total1)
+                print("(in train.py) Rendering Time: ", total1)
                 # #print(f"Action: {action}")
                 #print(f"Actor Current Input (x, y): {actor_current_input}")
 
@@ -318,17 +322,10 @@ def train(config):
                 #log_canvas_step(canvas, reward, env.used_strokes, episode)
 
                 # next_canvas from env.step = (C, H, W)
-                # canvas_tensor = (B, C, H, W)
                 if isinstance(next_canvas, np.ndarray):
                     canvas_tensor = torch.from_numpy(next_canvas).float().unsqueeze(0).to(config["device"])
                 else:
                     canvas_tensor = next_canvas.float().unsqueeze(0).to(config["device"])
-
-                # Store experience in replay buffer
-                # replay_buffer.store(canvas, prev_action, action, next_canvas, reward, done)
-                # replay buffer store gpu tensors directly now
-                #def to_numpy(x):
-                #    return x.detach().cpu().numpy() if torch.is_tensor(x) else x
                 
                 # canvas = (B, C, H, W)
                 # canvas_for_buffer = (C, H, W) using this so that canvas sizes don't get messed up when doing canvas = next canvas
@@ -336,15 +333,13 @@ def train(config):
 
                 # canvas_for_buffer = (C, H, W)
                 # next_canvas = (C, H, W)
-                actor_prev_input = np.round(actor_prev_input, 6).astype(np.float32)
-                actor_current_input = np.round(actor_current_input, 6).astype(np.float32)
+                #actor_prev_input = np.round(actor_prev_input, 6).astype(np.float32)
+                #actor_current_input = np.round(actor_current_input, 6).astype(np.float32)
                 # actor_prev_input, actor_current_input are being stored in absolute coordinates
                 replay_buffer.store(
                     canvas_for_buffer,
-                    #prev_action,
-                    actor_prev_input,
-                    #action,
-                    actor_current_input,
+                    current_idx,
+                    action_idx,
                     next_canvas,
                     reward,
                     done
@@ -363,7 +358,11 @@ def train(config):
                 agent.step = env.used_strokes
 
                 # Train the agent using sampled experiences
+                t4 = time.time()
                 agent.train(target_image)
+                t5 = time.time()
+                total2 = t5-t4
+                print("(in train.py) Training Time: ", total2)
 
                 # log to make sure actor/critic are updated every step 
                 """with open("logs/training_calls.log", "a") as f:
@@ -415,7 +414,8 @@ def train(config):
                     canvas_to_save = canvas[0]  # (C, H, W)
                     canvas_to_save = canvas_to_save.permute(1, 2, 0).contiguous()  # → (H, W, C)
                     save_canvas(canvas_to_save, save_path)
-                prev_action = action
+                #prev_action = action
+                current_idx = action_idx
                 #episode_reward += reward.item() #just assigning the float value
                 episode_reward += reward
 
@@ -437,7 +437,9 @@ def train(config):
 
             # w and b
             #log_canvas_video_and_table(episode)
-            log_canvas_video(episode, episode_frames, fps=15)
+            # Log episode video only for the 1st and every 50th episode
+            if (episode + 1) == 1 or (episode + 1) % 50 == 0:
+                log_canvas_video(episode, episode_frames, fps=30)
             wandb.log({f"Episode_{episode + 1}_Step_Table": episode_table})
 
             # Decay exploration noise every 20 episodes

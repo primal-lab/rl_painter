@@ -89,13 +89,26 @@ def update_canvas_torch(canvas: torch.Tensor,
 
     coords = torch.tensor(points, dtype=torch.long, device=device).T  # (2, N) - convert to tensor
 
-    # decide the color of the selected pixels and color those pixels on canvas
-    if canvas.ndim == 2 or canvas.shape[0] == 1: #greyscale
-        canvas[0, coords[0], coords[1]] = color if isinstance(color, (int, float)) else float(
-            0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2])
+    # 90% of the pixel (color) stays the same, and 10% is replaced with the new color
+    alpha = 0.1  # 10% opacity 
+
+    # Determine per-channel stroke color -> canvas (c, h, w)
+    if isinstance(color, (int, float)): # single value like 255 or 0.5
+        # if c=3 (rgb), if color = 255 and canvas is RGB, stroke_color = [255, 255, 255]
+        stroke_color = [color] * canvas.shape[0] 
+    elif isinstance(color, (tuple, list)):
+        if len(color) == 1: # single-element tuple like (200,), expand it for all channels
+            stroke_color = [color[0]] * canvas.shape[0]
+        else:
+            stroke_color = color # something like (255, 0, 0) and canvas has 3 channels, it's good to go
     else:
-        for c in range(canvas.shape[0]):
-            canvas[c, coords[0], coords[1]] = color[c] if isinstance(color, (list, tuple)) else color
+        raise ValueError("Unsupported color type for stroke")
+
+    # Apply alpha blending per channel
+    for c in range(canvas.shape[0]):
+        # new_pixel_value = [(1 - alpha) * old_value] + [alpha * stroke_value]
+        # so 90% old value + 10% new value of color
+        canvas[c, coords[0], coords[1]] = ((1 - alpha) * canvas[c, coords[0], coords[1]] + alpha * stroke_color[c])
 
     return canvas
 

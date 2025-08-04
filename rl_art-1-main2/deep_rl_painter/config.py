@@ -30,17 +30,17 @@ config = {
 
     # model parameters
     "model_name": "resnet18",                # check models/image_encoder.py for available models
-    "actor_lr": 1e-4,           
+    "actor_lr": 1e-4,                        # 1 * 10^(-4)  
     "critic_lr": 1e-4,
     #"buffer_size": 100000, same thing as below
     "replay_buffer_capacity": 100000,
 
-    "batch_size": 32,                       # if training is unstable (reward jumps/loss spikes), =32
+    "batch_size": 64,                       # if training is unstable (reward jumps/loss spikes), =32
     "gamma": 0.99,
     "tau": 0.005,
     "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-    # 2D action space (x, y, r, g, b, w)
-    "action_dim": 6,
+    # 2D action space (x, y, r, g, b, w) - not anymore
+    "action_dim": 1, # previous point index only
     # reward function (ssim, mse, perceptual)
     "reward_method": "CLIP_cosine_similarity",
 
@@ -59,7 +59,8 @@ config = {
     "save_best_model_name": "best_model.pth",
 
     # Canvas parameters
-    "canvas_size": (224, 224),  # (height, width)
+    #"canvas_size": (224, 224),  # (height, width)
+    "canvas_size": (1024, 1024),
     "canvas_channels": 1,  # 1 for grayscale, 3 for RGB
     "canvas_color": (0, 0, 0),  # black background
     "canvas_stroke_color": 255,  # white stroke

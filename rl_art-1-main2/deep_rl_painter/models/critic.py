@@ -19,7 +19,7 @@ class Critic(nn.Module):
                  pretrained: bool = True,
                  fine_tune_encoder: bool = True,
                  fine_tune_encoder_2: bool = True,
-                 actor_network_input: int = 12,  # actor_network_input*2 
+                 actor_network_input: int = 180,  # one-hot vector of the current point
                  hidden_layers: list = [512, 256, 128, 64, 32],
                  use_custom_encoder: bool = False,
                  use_custom_encoder_2: bool = False,
@@ -90,11 +90,11 @@ class Critic(nn.Module):
         """
         Forward pass through the model.
         Args:
-            input_image_1 (torch.Tensor): First (canvas) input image tensor.
-            input_image_2 (torch.Tensor): Second (target_image) input image tensor.
-            action_input (torch.Tensor): Action input tensor.
+            input_image_1: Canvas (B, C, H, W)
+            input_image_2: Target image (B, C, H, W)
+            action_input: One-hot vector of the chosen current nail (B, n_nails)
         Returns:
-            torch.Tensor: Output of the model.
+            Q-value: Estimated return for (state, action) (B, 1)
         """
         # Log input shapes: canvas, target, action
         #with open("logs/model/critic_input_shapes.log", "a") as f:
@@ -105,13 +105,15 @@ class Critic(nn.Module):
         #print("(in critic.py) input_image_1 shape:", input_image_1.shape) 
         input_image_2 = input_image_2.to(self.device)
         #print("(in critic.py) input_image_2 shape:", input_image_2.shape) 
+        action_input = action_input.to(self.device)
+
         out = self.model(input_image_1, input_image_2, action_input)
 
         # Log Q-value shape and value from Critic
         #with open("logs/model/critic_output.log", "a") as f:
         #   f.write(f"Q-value shape: {out.shape}, Value: {out.detach().cpu().numpy().tolist()}\n")
 
-        return out
+        return out # q value
 
     def save_model(self, path):
         """

@@ -141,8 +141,8 @@ class MergedNetwork(nn.Module):
         """
         # Example input for size check
         device = next(encoder.parameters()).device
-        dummy_input = torch.randn(1, self.in_channels, 224, 224, device=device)
-        #!dummy_input = torch.randn(1, self.in_channels, 224, 224)  # Assume 224x224 input
+        #dummy_input = torch.randn(1, self.in_channels, 1024, 1024, device=device)
+        dummy_input = torch.randn(1, self.in_channels, 224, 224, device=device)  # Assume 224x224 input
         if next(encoder.parameters()).is_cuda:
             dummy_input = dummy_input.to(next(encoder.parameters()).device)
 
@@ -201,12 +201,15 @@ class MergedNetwork(nn.Module):
         Forward pass through the dual image processor.
 
         Args:
-            image1 (torch.Tensor): The first input image tensor.
-            image2 (torch.Tensor): The second input image tensor.
+            image1 (torch.Tensor): The first input image tensor - canvas
+            image2 (torch.Tensor): The second input image tensor - target
 
         Returns:
             torch.Tensor: The output of the merged network.
         """
+        #print(f"[DEBUG] action_params shape: {action_params.shape}")
+        #print(f"[DEBUG] action_params values:\n{action_params}")
+
         # Pass each image through its encoder
         features_1 = self.image_encoder_1(image1)
         features_2 = self.image_encoder_2(image2)
@@ -215,13 +218,6 @@ class MergedNetwork(nn.Module):
             features_1 = features_1[0]
         if isinstance(features_2, tuple):
             features_2 = features_2[0]
-
-        # Concatenate the features
-        """if action_params is not None:
-            merged_features = torch.cat(
-                (features_1, features_2, action_params), dim=1)
-        else:
-            merged_features = torch.cat((features_1, features_2), dim=1)"""
 
         # Concatenate the features
         merged_features = torch.cat((features_1, features_2), dim=1)

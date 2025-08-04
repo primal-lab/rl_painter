@@ -103,6 +103,7 @@ class PaintingEnv(gym.Env):
         self.segments_map = segments_tensor  # shape: (H, W)
 
         # generating nails on the circle
+        self.height, self.width = self.canvas.shape[:2]
         self.nails = self.generate_nails(self.n_nails)
         # start at a random point (goes into point history)
         self.current_idx = np.random.randint(0, self.n_nails)
@@ -136,7 +137,6 @@ class PaintingEnv(gym.Env):
 
         return img  # Fallback: NumPy array
 
-
     def random_circle_point(self):
         """
         Generates a random point on the circumference of a circle. As initial point.
@@ -169,12 +169,18 @@ class PaintingEnv(gym.Env):
         angles = np.linspace(0, 2 * np.pi, n_nails, endpoint=False)
         
         # marking the points on the circumference, acc to the angles generated
+        # starts at 12 o'clock and goes clockwise
         nail_positions = []
-        for a in angles:
-            x = int(self.center[0] + self.radius * np.cos(a))
-            y = int(self.center[1] + self.radius * np.sin(a))
+        for theta in angles:
+            x = int(self.center[0] + self.radius * np.sin(theta))
+            y = int(self.center[1] - self.radius * np.cos(theta))
+            
+            # clamps 1024 to be 1023
+            x = min(int(x), self.width - 1)
+            y = min(int(y), self.height - 1)
+
             nail_positions.append((x, y))
-        
+
         # [(x1, y1), (x2, y2), ...]
         return nail_positions   
 
@@ -194,12 +200,16 @@ class PaintingEnv(gym.Env):
         start_point = self.nails[self.current_idx]
         end_point = self.nails[action_idx]
 
+        t0 = time.time()
         self.canvas = update_canvas(
             self.canvas,
             start_point,
             end_point,
             channels=self.channels # add color and width later
         )
+        t1 = time.time()
+        total = t1-t0
+        print("(in env.step) Update Canvas Time: ", total)
 
         self.used_strokes += 1
         next_idx = action_idx
@@ -214,6 +224,7 @@ class PaintingEnv(gym.Env):
         current_tensor = self.to_tensor(self.canvas)
         target_tensor = self.to_tensor(self.target_image)
 
+        t2 = time.time()
         reward = calculate_reward(
             prev_tensor, current_tensor, target_tensor, device=self.device,
             prev_prev_point=self.prev_prev_point,
@@ -224,6 +235,9 @@ class PaintingEnv(gym.Env):
             current_episode=current_episode, current_step=current_step,
             segments_map=self.segments_map
         )
+        t3 = time.time()
+        total1 = t3-t2
+        print("(in env.step) Reward Time: ", total1)
 
         done = self.used_strokes >= self.max_strokes
 
@@ -237,11 +251,11 @@ class PaintingEnv(gym.Env):
         
 
     """def step(self, action, current_episode=None, current_step=None):
-        """
+        
         #Takes a step in the environment using the given action.
         #The action is a 2D vector representing the direction of the stroke.
         #The reward is calculated based on the difference between the current canvas and the target image.
-        """
+        
         
         # self.canvas = prev_canvas = (H, W, C)
         prev_canvas = self.canvas.clone()
@@ -326,6 +340,21 @@ class PaintingEnv(gym.Env):
         return canvas_to_return, reward, done, next_point
     """
 
+    def draw_nails(self, canvas, nail_positions, color=255):
+        """
+        Draws dots at given nail positions.
+        """
+        for point in nail_positions:
+            canvas = update_canvas(
+                canvas,
+                point,
+                point,  # draw a dot at this point
+                color=color,
+                width=1,
+                channels=canvas.shape[2] if isinstance(canvas, torch.Tensor) else canvas.shape[-1]
+            )
+        return canvas
+
     def reset(self):
         """
         Resets the environment to its initial state.
@@ -333,6 +362,8 @@ class PaintingEnv(gym.Env):
             canvas (numpy.ndarray): The initial canvas state.
         """
         self._initialize()
+        # color = 50 -> grey dots
+        self.canvas = self.draw_nails(self.canvas, self.nails, color=50)  # use precomputed nail positions
         return self.canvas, self.current_idx
 
     # def render(self, mode='human'):

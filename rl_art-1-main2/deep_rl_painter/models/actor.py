@@ -19,7 +19,7 @@ class Actor(nn.Module):
                  pretrained: bool = True,
                  fine_tune_encoder: Optional[bool] = True,
                  fine_tune_encoder_2: Optional[bool] = True,
-                 actor_network_input: int = 6,  # 2 for x,y and 6 for x,y,r,g,b, width
+                 actor_network_input: int = 180,  # one-hot vector of the prev point
                  hidden_layers: list = [512, 256, 128, 64, 32],
                  use_custom_encoder: Optional[bool] = False,
                  use_custom_encoder_2: Optional[bool] = False,
@@ -27,7 +27,7 @@ class Actor(nn.Module):
                  custom_encoder_2: nn.Module = None,
                  activation_function: str = 'LeakyReLU',
                  in_channels: int = 1, # 3 for rgb
-                 out_neurons: int = 6,
+                 out_neurons: int = 185, # number of nails + r,g,b,w,o
                  ) -> None:
         """
         Initialize the Actor model.
@@ -93,7 +93,8 @@ class Actor(nn.Module):
         Args:
             input_image_1 (torch.Tensor): First (canvas) input image tensor. # (B, H, W, C) 
             input_image_2 (torch.Tensor): Second (target_image) input image tensor. # (B, H, W, C) 
-            action_input (torch.Tensor): Action input tensor - prev_action. # (B, action_dim)
+            #action_input (torch.Tensor): Action input tensor - prev_action. # (B, action_dim)
+            action_input: one-hot vector of the prev point
         Returns:
             torch.Tensor: Output of the model.
         """
@@ -104,29 +105,37 @@ class Actor(nn.Module):
          #   f.write(f"Canvas: {input_image_1.shape}, Target: {input_image_2.shape}, PrevAction: {action_input.shape}\n")
 
         # Inputs are already (B, C, H, W), no permute needed
-        input_image_1 = input_image_1.to(self.device)
-        input_image_2 = input_image_2.to(self.device)
+        canvas_image = input_image_1.to(self.device)
+        target_image = input_image_2.to(self.device)
         action_input = action_input.to(self.device) #!
         
         # call merge_network
-        out = self.model(input_image_1, input_image_2, action_input)
+        out = self.model(canvas_image, target_image, action_input) # (B, nails + 5)
+        
+        # Split output
+        nail_logits = out[:, :self.out_neurons - 5]           # (B, nails)
+        stroke_params = out[:, self.out_neurons - 5:]         # (B, 5)
 
-        # Normalization - actor.py - why?
+        nail_probs = torch.softmax(nail_logits, dim=-1)       # probs for next nail
+
+        # Normalization - actor.py
         #import pdb
         #pdb.set_trace()
         # out of every single batch, get the first 2 columns
-        direction = out[:, :2]
+        """direction = out[:, :2]
         norm = torch.norm(direction, dim=1)
         normalized_direction = direction / (norm.unsqueeze(1) + 1e-16)
-        out = torch.cat([normalized_direction, out[:, 2:]], dim=1)
+        out = torch.cat([normalized_direction, out[:, 2:]], dim=1)"""
 
         # Log output shape and values from Actor
         """with open("logs/model/actor_output.log", "a") as f:
             f.write(f"Action shape: {out.shape}, Values: {out.detach().cpu().numpy().tolist()}\n")"""
-
         #print(f"Action shape: {out.shape}, Values: {out.detach().cpu().numpy().tolist()}\n")
 
-        return out # (B, action_dim)
+        #Output: nail_logits (probabilities over all nails)
+        # shape: (B, n_nails), for action pred it'll be (1, 180)
+        # [0.1, 0.003, 0.9, ......] 180 for nails
+        return nail_probs, stroke_params
 
     def save_model(self, path):
         """
