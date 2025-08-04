@@ -79,7 +79,7 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
 
     # penalize staying on the same nail (current_idx == action_idx)
     if prev_idx == current_idx:
-        total_reward = -100.0
+        total_reward -= 100.0
 
     # update cache
     CACHED_PREV_LATENT = current_latent

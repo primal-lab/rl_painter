@@ -107,6 +107,9 @@ class PaintingEnv(gym.Env):
         self.nails = self.generate_nails(self.n_nails)
         # start at a random point (goes into point history)
         self.current_idx = np.random.randint(0, self.n_nails)
+        # initialize index history
+        self.prev_idx = self.current_idx
+        self.prev_prev_idx = self.current_idx
 
     def load_image(self) -> Union[np.ndarray, torch.Tensor]:
         """
