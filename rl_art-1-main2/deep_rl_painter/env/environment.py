@@ -217,7 +217,7 @@ class PaintingEnv(gym.Env):
         # int values (indices) as of now
         # do self.nails[self.current_idx] to get x,y values
         self.prev_prev_idx = self.prev_idx
-        self.prev_idx = prev_idx
+        self.prev_idx = self.current_idx 
         self.current_idx = action_idx
 
         # compute reward 

@@ -75,34 +75,23 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
     prev_r = calculate_cosine_similarity(CACHED_PREV_LATENT, TARGET_LATENT)
     current_r = calculate_cosine_similarity(current_latent, TARGET_LATENT)
 
-    # brightness reward
-    if target_canvas is not None and prev_point is not None and current_point is not None:
-        segment_reward = segments_reward(prev_point, current_point, target_canvas)
-    else:
-        segment_reward = 0.0
+    total_reward = (current_r - prev_r).item() # range = [-2, 2]
 
-    brightness_scale = 0.1    
+    # penalize staying on the same nail (current_idx == action_idx)
+    if prev_idx == current_idx:
+        total_reward = -100.0
 
-    # dynamic reward fucntion
-    # encourage strokes in darker (less bright) regions initially, then focus on just similarity
-    if current_step is not None and current_step < 500:
-        total_reward = (current_r - prev_r).item() + brightness_scale * segment_reward
-    else:   
-        total_reward = (current_r - prev_r).item() # range = [-2, 2]
-
-
-
-    # Update cache
+    # update cache
     CACHED_PREV_LATENT = current_latent
 
     # log
-    log_file = "logs/reward_breakdown.csv"
+    """log_file = "logs/reward_breakdown.csv"
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
     with open(log_file, mode="a", newline="") as file:
         writer = csv.writer(file)
         if os.stat(log_file).st_size == 0:
-            writer.writerow(["prev canvas cos sim", "current canvas cos sim", "clip/cosine reward", "brightness reward", "total_reward"])
-        writer.writerow([prev_r.item(), current_r.item(), (current_r - prev_r).item(), segment_reward, total_reward])
+            writer.writerow(["prev canvas cos sim", "current canvas cos sim", "clip/cosine reward", "total_reward"])
+        writer.writerow([prev_r.item(), current_r.item(), (current_r - prev_r).item(), total_reward])"""
     
     return total_reward 
 
