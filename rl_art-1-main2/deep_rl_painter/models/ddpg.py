@@ -42,7 +42,7 @@ class DDPGAgent:
         self.actor_target.load_state_dict(actor.state_dict())
         self.critic_target.load_state_dict(critic.state_dict())
 
-        # keep track of epiosde and step numbers
+        # keep track of epiosde and step numbers - never used
         self.episode = 0
         self.step = 0
 
@@ -51,8 +51,10 @@ class DDPGAgent:
         self.critic = critic.to(self.device)
         self.actor_target = actor_target.to(self.device)
         self.critic_target = critic_target.to(self.device)
+        
+        self.resized_target = None  # cache for resized target image
 
-        os.makedirs("logs/model", exist_ok=True)
+        #os.makedirs("logs/model", exist_ok=True)
 
     # resize canvas and target to 224x224 before passing into networks
     def resize_input(self, x, size=(224, 224)):
@@ -140,17 +142,22 @@ class DDPGAgent:
         current_onehot = F.one_hot(current_idx, nails).float().to(self.device)  # (B, nails)
         next_onehot = F.one_hot(action_idx, nails).float().to(self.device)      # (B, nails)
 
-        # Convert target image and repeat for batch (one target per sample)
-        if isinstance(target_image, np.ndarray):
-            target = torch.from_numpy(target_image).float().to(self.device)
-        else:
-            target = target_image.to(self.device)
-        target = target.repeat(B, 1, 1, 1)  # (B, C, H, W)
+        # Convert target image, resize to 244x244, and repeat for batch (one target per sample)
+        # target image is only resized once for the entire run here, but
+        # if there is a new target image for each episode, do this in train loop once per episde - 
+        # if agent.resized_target is None:
+        #   agent.resized_target = agent.resize_input(target_image)
+        #   agent.train(agent.resized_target)
+        if self.resized_target is None:
+            if isinstance(target_image, np.ndarray):
+                target_image = torch.from_numpy(target_image).float()
+            target_image = target_image.to(self.device)
+            self.resized_target = self.resize_input(target_image)
+        target_resized = self.resized_target.repeat(B, 1, 1, 1)
 
-        # resize canvases and target to 224x224
+        # resize canvases to 224x224
         canvas_resized = self.resize_input(canvas)
         next_canvas_resized = self.resize_input(next_canvas)
-        target_resized = self.resize_input(target)
 
         # ====== Critic Target Calculation ======
         with torch.no_grad():

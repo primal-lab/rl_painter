@@ -203,6 +203,8 @@ class PaintingEnv(gym.Env):
         start_point = self.nails[self.current_idx] # x,y
         end_point = self.nails[action_idx] # x,y
 
+        # Update canvas only if action idx is different
+        #if action_idx != self.current_idx:
         t0 = time.time()
         self.canvas = update_canvas(
             self.canvas,
@@ -213,8 +215,15 @@ class PaintingEnv(gym.Env):
         t1 = time.time()
         total = t1-t0
         print("(in env.step) Update Canvas Time: ", total)
-
+        
         self.used_strokes += 1
+        
+        """else:
+            os.makedirs("logs/env", exist_ok=True)
+            with open("logs/env/stuck_index.log", "a") as f:
+                f.write(
+                    f"Stuck at step={current_step}, episode={current_episode}, index={action_idx}\n"
+                )"""
 
         # update point history (used in reward)
         # int values (indices) as of now
@@ -255,97 +264,6 @@ class PaintingEnv(gym.Env):
         )
         return canvas_to_return, reward, done
         
-
-    """def step(self, action, current_episode=None, current_step=None):
-        
-        #Takes a step in the environment using the given action.
-        #The action is a 2D vector representing the direction of the stroke.
-        #The reward is calculated based on the difference between the current canvas and the target image.
-        
-        
-        # self.canvas = prev_canvas = (H, W, C)
-        prev_canvas = self.canvas.clone()
-
-        # Calculate direction and next point
-        # x,y is a unit vector (from actor.py) + noise (from ddpg.py)
-        # so normalise again
-        direction = action[:2] 
-        # Check for NaNs or near-zero norm 
-        if np.any(np.isnan(direction)) or np.linalg.norm(direction) < 1e-6:
-            unit_vector = np.array([1.0, 0.0], dtype=np.float32)  # safe default
-        else:
-            unit_vector = direction / (np.linalg.norm(direction) + 1e-8)
-
-        # Log action, unit vector, and norm for each stroke
-        # with open("logs/env/step_vectors.log", "a") as f:
-        #    f.write(f"Stroke {self.used_strokes + 1} | Action: {action.tolist()} | Unit Vector: {unit_vector.tolist()} | Norm: {norm}\n")
-
-        # get the points on the circle (using the unit vec) by scaling it with radius
-        next_point = np.array([
-            self.center[0] + unit_vector[0] * self.radius,
-            self.center[1] + unit_vector[1] * self.radius], dtype=np.float32)
-
-        t0 = time.time()
-        # self.canvas is (H, W, C)
-        self.canvas = update_canvas(self.canvas, tuple(self.current_point), tuple(next_point))
-        t1 = time.time()
-        total = t1-t0
-        #print("(in env.step) Rendering Time: ", total)
-        self.used_strokes += 1
-
-        # Log stroke movement from previous to next point
-        #with open("logs/env/strokes.log", "a") as f:
-        #    f.write(f"Episode stroke {self.used_strokes} | From: {tuple(self.current_point)} → To: {tuple(next_point)}\n")
-        
-        # Update point history
-        self.prev_prev_point = self.prev_point
-        self.prev_point = self.current_point.copy()
-        self.current_point = next_point.copy()
-        #self.current_point = next_point
-        
-        # Compute reward
-        prev_tensor = self.to_tensor(prev_canvas) 
-        current_tensor = self.to_tensor(self.canvas)
-        # self.target_image = (H, W, C)
-        # target_tensor = (B, H, W, C)
-        target_tensor = self.to_tensor(self.target_image)
-
-        # select the right simplified target version (out of 10) based on stroke count
-        #stage_idx = min(9, self.used_strokes // 200)
-        # simplified_targets[stage_idx] = (B, C, H, W)
-        # target_tensor = (B, H, W, C)
-        #target_tensor = self.simplified_targets[stage_idx].permute(0, 2, 3, 1).to(self.device)
-
-        # reward is a tensor here
-        t2 = time.time()
-        #reward = calculate_reward(current_tensor, target_tensor, device=self.device)
-        reward = calculate_reward(prev_tensor, current_tensor, target_tensor, device=self.device,
-                          prev_prev_point=self.prev_prev_point,
-                          prev_point=self.prev_point,
-                          current_point=self.current_point, 
-                          center=self.center, edge_map=self.edge_map, 
-                          current_episode=current_episode, current_step=current_step, 
-                          segments_map=self.segments_map)
-        t3 = time.time()
-        total1 = t3-t2
-        #print("(in env.step)Reward Time:", total1)
-        done = self.used_strokes >= self.max_strokes
-        
-        # the line below was used create the next state representation for the agent, to save in replay buffer 
-        #next_state = self.to_tensor(self.canvas).squeeze(0).cpu().numpy().flatten()
-
-        # Log reward value for each stroke
-        #with open("logs/env/rewards.log", "a") as f:
-        #    f.write(f"Stroke {self.used_strokes} | Reward: {reward.item()}\n")
-
-        canvas_to_return = self.canvas # (H, W, C)
-        if isinstance(canvas_to_return, torch.Tensor):
-            canvas_to_return = canvas_to_return.permute(2, 0, 1).contiguous()  # (C, H, W)
-        else:
-            canvas_to_return = np.transpose(canvas_to_return, (2, 0, 1))       # (C, H, W)
-        return canvas_to_return, reward, done, next_point
-    """
-
     def draw_nails(self, canvas, nail_positions, color=255):
         """
         Draws dots at given nail positions.

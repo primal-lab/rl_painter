@@ -11,7 +11,7 @@ config = {
     # training setup
     # True for training, False for production mode
     "train": True,
-    "seed": 42,
+    "seed": 32, # change to 42 later
 
     "episodes": 5000,                        # change to 500 or more later
     "nails": 180,                            # number of nails
@@ -30,8 +30,8 @@ config = {
 
     # model parameters
     "model_name": "resnet18",                # check models/image_encoder.py for available models
-    "actor_lr": 1e-4,                        # 1 * 10^(-4)  
-    "critic_lr": 1e-4,
+    "actor_lr": 1e-5,                        # 1 * 10^(-4)  
+    "critic_lr": 1e-5,
     #"buffer_size": 100000, same thing as below
     "replay_buffer_capacity": 100000,
 

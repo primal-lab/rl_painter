@@ -227,6 +227,9 @@ def train(config):
             episode_table = wandb.Table(columns=["Step", "Reward", "Canvas"])
             #start_visual_logging(episode)
 
+            # for replay buffer
+            just_stuck_once = False
+
             #canvas = env.reset() 
             canvas, current_idx = env.reset() # canvas = (H, W, C) tensor
             
@@ -336,6 +339,12 @@ def train(config):
                 #actor_prev_input = np.round(actor_prev_input, 6).astype(np.float32)
                 #actor_current_input = np.round(actor_current_input, 6).astype(np.float32)
                 # actor_prev_input, actor_current_input are being stored in absolute coordinates
+                
+                # Detect if agent is stuck
+                #is_stuck = (current_idx == action_idx)
+                # Store only if not stuck, or if stuck for the first time in a row
+                # store "if (true)"
+                #if not is_stuck or not just_stuck_once:
                 replay_buffer.store(
                     canvas_for_buffer,
                     current_idx,
@@ -344,6 +353,8 @@ def train(config):
                     reward,
                     done
                 )
+                # Update flag for next step
+                #just_stuck_once = is_stuck
 
                 """print(
                 f"[ReplayBuffer Store] canvas.shape={canvas_for_buffer.shape}, "
@@ -354,6 +365,7 @@ def train(config):
                 )"""
 
                 # keep track of epiosde and step numbers for update actor/critic
+                # never used in ddpg.py (self.episode, self.step)
                 agent.episode = episode + 1
                 agent.step = env.used_strokes
 
@@ -392,6 +404,7 @@ def train(config):
                 if img.ndim == 2:
                     img = img[:, :, np.newaxis]
                 tensor_for_table = torch.from_numpy(img).permute(2, 0, 1)
+                #print(tensor_for_table.shape)
                 log_step_to_table(episode_table, env.used_strokes + 1, reward, tensor_for_table)
 
                 # Save 1st episode's and every 10th episode's final step (2000th step)
@@ -440,7 +453,8 @@ def train(config):
             # Log episode video only for the 1st and every 50th episode
             if (episode + 1) == 1 or (episode + 1) % 50 == 0:
                 log_canvas_video(episode, episode_frames, fps=30)
-            wandb.log({f"Episode_{episode + 1}_Step_Table": episode_table})
+            # table logging    
+            #wandb.log({f"Episode_{episode + 1}_Step_Table": episode_table})
 
             # Decay exploration noise every 20 episodes
             if (episode + 1) % 20 == 0:
