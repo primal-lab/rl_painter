@@ -168,8 +168,7 @@ class MergedNetwork(nn.Module):
             nn.Sequential: The merged network.
         """
         layers: List[nn.Module] = []
-        input_size = self.encoder_output_size1 + \
-            self.encoder_output_size2  # Concatenated output size
+        input_size = self.encoder_output_size1 + self.encoder_output_size2  # Concatenated output size
 
         if self.actor_network_input > 0:
             input_size += self.actor_network_input
@@ -192,7 +191,7 @@ class MergedNetwork(nn.Module):
             input_size = hidden_size  # Update input size for the next layer
 
         # Add the final output layer
-        layers.append(nn.Linear(input_size, self.merged_output_size, bias=False))
+        layers.append(nn.Linear(input_size, self.merged_output_size, bias=True))
 
         self.merged_network = nn.Sequential(*layers)
 

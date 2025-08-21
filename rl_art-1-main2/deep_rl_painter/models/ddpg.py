@@ -57,8 +57,12 @@ class DDPGAgent:
         #os.makedirs("logs/model", exist_ok=True)
 
     # resize canvas and target to 224x224 before passing into networks
+    # runs on gpu because all inputs given later are tensors
     def resize_input(self, x, size=(224, 224)):
         # x: (B, C, H, W) or (1, C, H, W) 
+        # interpolate = scales tensors up or down 
+        # Bilinear interpolation: takes the 4 nearest pixels around a new location and averages them weighted by distance.`11111`
+        # corners-false = Pixel centers are scaled proportionally inside the new size.
         return F.interpolate(x, size=size, mode='bilinear', align_corners=False)
 
     def select_action(self, canvas, target_image, prev_action_onehot):
@@ -139,8 +143,9 @@ class DDPGAgent:
         # indices are already torch tensors of shape (B,) and dtype long, as F.one_hot() expects
         current_idx = current_idx.view(-1)  # ensures shape (B,)
         action_idx = action_idx.view(-1)
-        current_onehot = F.one_hot(current_idx, nails).float().to(self.device)  # (B, nails)
-        next_onehot = F.one_hot(action_idx, nails).float().to(self.device)      # (B, nails)
+        #current_onehot = F.one_hot(current_idx, nails).float().to(self.device)  # (B, nails)
+        current_onehot = F.one_hot(current_idx, nails).float()
+        next_onehot = F.one_hot(action_idx, nails).float()     # (B, nails)
 
         # Convert target image, resize to 244x244, and repeat for batch (one target per sample)
         # target image is only resized once for the entire run here, but
@@ -149,9 +154,9 @@ class DDPGAgent:
         #   agent.resized_target = agent.resize_input(target_image)
         #   agent.train(agent.resized_target)
         if self.resized_target is None:
-            if isinstance(target_image, np.ndarray):
-                target_image = torch.from_numpy(target_image).float()
-            target_image = target_image.to(self.device)
+            #if isinstance(target_image, np.ndarray):
+            #    target_image = torch.from_numpy(target_image).float()
+            #target_image = target_image.to(self.device)
             self.resized_target = self.resize_input(target_image)
         target_resized = self.resized_target.repeat(B, 1, 1, 1)
 
@@ -164,7 +169,7 @@ class DDPGAgent:
             # add stroke parameters instead of _ here, later
             nail_probs, _ = self.actor_target(next_canvas_resized, target_resized, next_onehot)
             sampled_idx = torch.argmax(nail_probs, dim=1)  # (B,)
-            sampled_onehot = F.one_hot(sampled_idx, nails).float().to(self.device)  # (B, nails)
+            sampled_onehot = F.one_hot(sampled_idx, nails).float()  # (B, nails)
 
             target_Q = self.critic_target(next_canvas_resized, target_resized, sampled_onehot)
             target_Q = rewards + self.config["gamma"] * target_Q * (1 - dones)
@@ -180,7 +185,7 @@ class DDPGAgent:
         # ====== Actor Update ======
         nail_probs_pred, _ = self.actor(canvas_resized, target_resized, current_onehot)
         pred_idx = torch.argmax(nail_probs_pred, dim=1)  # (B,)
-        pred_onehot = F.one_hot(pred_idx, nails).float().to(self.device)
+        pred_onehot = F.one_hot(pred_idx, nails).float()
 
         actor_loss = -self.critic(canvas_resized, target_resized, pred_onehot).mean()
 

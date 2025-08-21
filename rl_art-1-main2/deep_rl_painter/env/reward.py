@@ -75,7 +75,7 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
     prev_r = calculate_cosine_similarity(CACHED_PREV_LATENT, TARGET_LATENT)
     current_r = calculate_cosine_similarity(current_latent, TARGET_LATENT)
 
-    total_reward = (current_r - prev_r).item() # range = [-2, 2]
+    total_reward = (current_r - prev_r).item() * 10 # range = [-2, 2]
 
     # penalize staying on the same nail (current_idx == action_idx)
     if prev_idx == current_idx:

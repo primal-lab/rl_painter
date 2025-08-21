@@ -408,7 +408,7 @@ def train(config):
                 log_step_to_table(episode_table, env.used_strokes + 1, reward, tensor_for_table)
 
                 # Save 1st episode's and every 10th episode's final step (2000th step)
-                if ((episode + 1) == 1 or (episode + 1) % 10 == 0) and env.used_strokes == config["max_strokes"] - 1:
+                if ((episode + 1) == 1 or (episode + 1) % 100 == 0) and env.used_strokes == config["max_strokes"] - 1:
                     step_dir = f"step_outputs/episode_{episode + 1}"
                     os.makedirs(step_dir, exist_ok=True)
                     # sample path: step_outputs/episode_25000/episode_25000_step_00150.png
