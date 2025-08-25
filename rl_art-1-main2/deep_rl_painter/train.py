@@ -50,7 +50,7 @@ def train(config):
 
     wandb.init(
         project="ddpg-painter",             
-        name="run-3",               
+        name="preprocess-gpu-run",               
         config=config              
     )
 

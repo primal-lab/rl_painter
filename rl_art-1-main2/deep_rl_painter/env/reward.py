@@ -24,6 +24,8 @@ from skimage.draw import line as skimage_line
 from config import config
 import torchvision.transforms as T
 from torchvision.transforms.functional import resize, center_crop
+from .clip_preprocess_gpu import build_gpu_preprocess
+
 
 # target_latent
 TARGET_LATENT = None
@@ -312,7 +314,8 @@ def get_latent_representation(image, device):
     # Modify the model to output the features from the penultimate layer
     global CLIP_MODEL, PREPROCESS
     if CLIP_MODEL is None:
-        CLIP_MODEL, PREPROCESS = clip.load("ViT-B/32", device=device)
+        CLIP_MODEL, _ = clip.load("ViT-B/32", device=device)
+        PREPROCESS = build_gpu_preprocess(CLIP_MODEL.visual.input_resolution, device)
     # print(PREPROCESS) -> controls resizing to 224*224 already 
 
     if len(image.shape) == 4 and (image.shape[1] != 1 or image.shape[1] != 3):
@@ -322,7 +325,8 @@ def get_latent_representation(image, device):
             image = image[0]
         image = image.detach().cpu() if image.is_cuda else image
         t2 = time.time()
-        image = PREPROCESS(transforms.ToPILImage()(image)).unsqueeze(0).to(device)
+        #image = PREPROCESS(transforms.ToPILImage()(image)).unsqueeze(0).to(device)
+        image = PREPROCESS(image)  # returns [B=1, 3, n_px, n_px] on GPU, normalized
         t3 = time.time()
         total2 = t3-t2
         print("(in reward.py) preprocess Time: ", total2)
