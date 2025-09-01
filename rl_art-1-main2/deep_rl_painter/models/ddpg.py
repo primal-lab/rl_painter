@@ -96,9 +96,10 @@ class DDPGAgent:
             #with open("logs/model/actor_actions.log", "a") as f:
             #    f.write(f"Action shape: {out.shape}, Values: {out.tolist()}\n")
         self.actor.train()
+        print ("Action idx(argmax)", action_idx)
         return action_idx
 
-    def act(self, canvas, target_image, prev_action_idx, noise_scale=0.01):
+    def act(self, canvas, target_image, prev_action_idx, noise_scale=0.01,episode=0, step=0):
         """
         Select an action and apply Ornstein-Uhlenbeck exploration noise.
         Used in train.py
@@ -112,18 +113,23 @@ class DDPGAgent:
         Returns:
             action_idx (int): Selected nail index for next stroke.
         """
-        p = np.random.rand()  # uniform in [0, 1]
-        # make it dynamic later (threshold=0.8 now)
-        # more exploration in initial stages, more exploitation later on
-        if p > 0.8:
-            # exploration: pick a random nail index (20%)
+        # for the first episode, the first 500 steps are just exploration (p=1)
+        if episode < 1 and step < 500:
             action_idx = np.random.randint(0, self.config["nails"])
         else:
-            # convert prev index to one-hot tensor
-            nails = self.config["nails"]
-            one_hot_prev = F.one_hot(torch.tensor([prev_action_idx]), num_classes=nails).float().to(self.device)
-            # exploitation: use policy network
-            action_idx = self.select_action(canvas, target_image, one_hot_prev)
+            p = np.random.rand()  # uniform in [0, 1]
+            #p = 0
+            # make it dynamic later (threshold=0.8 now)
+            # more exploration in initial stages, more exploitation later on
+            if p > 0.8:
+                # exploration: pick a random nail index (20%)
+                action_idx = np.random.randint(0, self.config["nails"])
+            else:
+                # convert prev index to one-hot tensor
+                nails = self.config["nails"]
+                one_hot_prev = F.one_hot(torch.tensor([prev_action_idx]), num_classes=nails).float().to(self.device)
+                # exploitation: use policy network
+                action_idx = self.select_action(canvas, target_image, one_hot_prev)
         return action_idx
 
     def update_actor_critic(self, target_image):
@@ -144,8 +150,8 @@ class DDPGAgent:
         current_idx = current_idx.view(-1)  # ensures shape (B,)
         action_idx = action_idx.view(-1)
         #current_onehot = F.one_hot(current_idx, nails).float().to(self.device)  # (B, nails)
-        current_onehot = F.one_hot(current_idx, nails).float()
-        next_onehot = F.one_hot(action_idx, nails).float()     # (B, nails)
+        current_onehot = F.one_hot(current_idx, nails).float().to(self.device)
+        next_onehot = F.one_hot(action_idx, nails).float().to(self.device)     # (B, nails)
 
         # Convert target image, resize to 244x244, and repeat for batch (one target per sample)
         # target image is only resized once for the entire run here, but
@@ -169,7 +175,7 @@ class DDPGAgent:
             # add stroke parameters instead of _ here, later
             nail_probs, _ = self.actor_target(next_canvas_resized, target_resized, next_onehot)
             sampled_idx = torch.argmax(nail_probs, dim=1)  # (B,)
-            sampled_onehot = F.one_hot(sampled_idx, nails).float()  # (B, nails)
+            sampled_onehot = F.one_hot(sampled_idx, nails).float().to(self.device)  # (B, nails)
 
             target_Q = self.critic_target(next_canvas_resized, target_resized, sampled_onehot)
             target_Q = rewards + self.config["gamma"] * target_Q * (1 - dones)
@@ -185,7 +191,7 @@ class DDPGAgent:
         # ====== Actor Update ======
         nail_probs_pred, _ = self.actor(canvas_resized, target_resized, current_onehot)
         pred_idx = torch.argmax(nail_probs_pred, dim=1)  # (B,)
-        pred_onehot = F.one_hot(pred_idx, nails).float()
+        pred_onehot = F.one_hot(pred_idx, nails).float().to(self.device)
 
         actor_loss = -self.critic(canvas_resized, target_resized, pred_onehot).mean()
 

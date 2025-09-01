@@ -287,7 +287,7 @@ class PaintingEnv(gym.Env):
         """
         self._initialize()
         # color = 50 -> grey dots
-        self.canvas = self.draw_nails(self.canvas, self.nails, color=50)  # use precomputed nail positions
+        self.canvas = self.draw_nails(self.canvas, self.nails, color=150)  # use precomputed nail positions
         return self.canvas, self.current_idx
 
     # def render(self, mode='human'):

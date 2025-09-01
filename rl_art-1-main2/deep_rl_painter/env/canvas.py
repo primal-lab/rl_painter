@@ -29,7 +29,7 @@ def init_canvas(image_shape: Tuple[int, int] | Tuple[int, int, int],
 
     # Compute color value per channel
     if color is None:
-        fill = [0.0] * C
+        fill = [255.0] * C #white background
     elif isinstance(color, int):
         fill = [float(color)] * C
     elif isinstance(color, tuple):
@@ -126,7 +126,8 @@ def update_canvas(canvas: Union[np.ndarray, torch.Tensor],
     if isinstance(canvas, torch.Tensor) and canvas.is_cuda:
         canvas_chw = canvas.permute(2, 0, 1).contiguous()  # (C, H, W)
         if color is None:
-            color = 255.0 if channels == 1 else (255.0, 255.0, 255.0)
+            #color = 255.0 if channels == 1 else (255.0, 255.0, 255.0)
+            color = 0.0 if channels == 1 else (0.0, 0.0, 0.0)  # black
         updated = update_canvas_torch(canvas_chw, start_point, end_point, color, width, channels)
         return updated.permute(1, 2, 0).contiguous()  # back to (H, W, C)
 
@@ -164,8 +165,9 @@ def save_canvas_torch(canvas: torch.Tensor, path: str) -> bool:
         print(f"Error: Invalid channel count in tensor shape {canvas.shape}")
         return False
 
-    inverted = 255 - img
-    success = cv2.imwrite(path, inverted)
+    #inverted = 255 - img
+    #success = cv2.imwrite(path, inverted)
+    success = cv2.imwrite(path, img)   # save directly, no inversion
     if not success:
         print(f"Error: Failed to save canvas to {path}")
     return success

@@ -220,10 +220,10 @@ class MergedNetwork(nn.Module):
 
         # Concatenate the features
         merged_features = torch.cat((features_1, features_2), dim=1)
-        if self.actor_network_input > 0:
-            if action_params is None:
-                raise ValueError("action_params must be provided if action_params_size > 0")
-            merged_features = torch.cat((merged_features, action_params), dim=1)
+        #if self.actor_network_input > 0:
+        #    if action_params is None:
+        #        raise ValueError("action_params must be provided if action_params_size > 0")
+        merged_features = torch.cat((merged_features, action_params), dim=1)
 
         # Log merged feature vector shape before FC layers
         #with open("logs/model/merged_network.log", "a") as f:

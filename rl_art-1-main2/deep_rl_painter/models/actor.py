@@ -107,7 +107,7 @@ class Actor(nn.Module):
         # Inputs are already (B, C, H, W), no permute needed
         canvas_image = input_image_1.to(self.device)
         target_image = input_image_2.to(self.device)
-        action_input = action_input.to(self.device) #!
+        action_input = action_input.to(self.device) # prev action one hot vector
         
         # call merge_network
         out = self.model(canvas_image, target_image, action_input) # (B, nails + 5)

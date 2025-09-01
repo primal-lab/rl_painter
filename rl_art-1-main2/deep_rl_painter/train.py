@@ -50,7 +50,7 @@ def train(config):
 
     wandb.init(
         project="ddpg-painter",             
-        name="preprocess-gpu-run",               
+        name="first_500steps_explore-2",               #first_500steps_explore
         config=config              
     )
 
@@ -293,11 +293,13 @@ def train(config):
                 # prev_action = (6,) -> later converted to tensor and (6,1) in select_action()
                 #action = agent.act(canvas_tensor, target_image, prev_action, noise_scale)
                 
+                current_episode = episode
+
                 # actor_prev_input = (2,) -> later converted to tensor and (2,1) in select_action()
                 # action is here numpy array (6,)
                 t0 = time.time()
                 #action = agent.act(canvas_tensor, target_image, actor_prev_input, noise_scale)
-                action_idx = agent.act(canvas_tensor, target_image, current_idx, noise_scale)
+                action_idx = agent.act(canvas_tensor, target_image, current_idx, noise_scale, episode=current_episode, step=env.used_strokes)
                 t1 = time.time()
                 total = t1-t0
                 print("(in train.py) Action Time: ", total)
@@ -312,7 +314,7 @@ def train(config):
                 # Apply action in the environment
                 # actor_current_input contains the current action's normalised x,y values
                 t2 = time.time()
-                current_episode = episode
+                #current_episode = episode
                 #next_canvas, reward, done, actor_current_input = env.step(action, current_episode=current_episode, current_step=env.used_strokes)
                 next_canvas, reward, done = env.step(action_idx, current_episode=episode, current_step=env.used_strokes)
                 t3 = time.time()
