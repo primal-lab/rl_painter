@@ -175,9 +175,10 @@ class DDPGAgent:
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        if self.viz_after_backward is not None:
+        if self.viz_after_backward is not None: #log
             self.viz_after_backward()
         self.critic_optimizer.step()
+        self.last_critic_loss = critic_loss.detach().item() #log
 
         # ====== Actor Update (stochastic policy gradient with Q) ======
         # π(a|s_t) using prev_onehot at s_t
@@ -194,9 +195,10 @@ class DDPGAgent:
 
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
-        if self.viz_after_backward is not None:
+        if self.viz_after_backward is not None: #log
             self.viz_after_backward()
         self.actor_optimizer.step()
+        self.last_actor_loss = actor_loss.detach().item()  #log
 
         # ====== Soft Updates ======
         self.soft_update(self.critic, self.critic_target, self.config["tau"])

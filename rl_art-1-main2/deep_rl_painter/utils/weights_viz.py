@@ -179,3 +179,46 @@ def snapshot_vector(model):
         if torch.is_floating_point(p):
             v.append(p.flatten().cpu())
     return torch.cat(v) if v else torch.tensor([])
+
+# ===== Ultra-light, GPU-friendly helpers =====
+
+@torch.no_grad()
+def flat_params(model, device):
+    """
+    One flat vector of trainable float params ON GPU (no CPU copy).
+    """
+    vecs = []
+    for p in model.parameters():
+        if p.requires_grad and torch.is_floating_point(p):
+            vecs.append(p.detach().view(-1))
+    if not vecs:
+        return torch.zeros(1, device=device)
+    return torch.cat(vecs, dim=0).to(device)
+
+@torch.no_grad()
+def grad_flow_mean(model, device):
+    """
+    Single mean(|grad|) over all params ON GPU; returns a Python float.
+    """
+    total_abs = torch.zeros((), device=device)
+    total_n   = torch.zeros((), device=device)
+    for p in model.parameters():
+        if p.grad is None:
+            continue
+        g = p.grad.detach()
+        total_abs += g.abs().sum()
+        total_n   += torch.tensor(g.numel(), device=device)
+    return (total_abs / total_n.clamp_min(1)).item()
+
+@torch.no_grad()
+def update_ratio_gpu(prev_vec, curr_vec, eps=1e-12):
+    """
+    ||ΔW|| / (||W|| + eps) computed ON GPU; returns a Python float.
+    """
+    delta = (curr_vec - prev_vec)
+    return (delta.norm() / (curr_vec.norm() + eps)).item()
+
+# Backward-compatible aliases (if you referenced the underscored names)
+_flat_params      = flat_params
+_grad_flow_mean   = grad_flow_mean
+_update_ratio_gpu = update_ratio_gpu
