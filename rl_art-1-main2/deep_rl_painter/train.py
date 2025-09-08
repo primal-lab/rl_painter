@@ -38,6 +38,19 @@ import cv2
 import wandb
 #from utils.wandb_logging import start_visual_logging, log_canvas_step, log_canvas_video_and_table
 from utils.wandb_logging import log_canvas_video, log_step_to_table
+from utils.weights_viz import (
+    layer_stats, WeightChangeTracker, gradient_flow,
+    conv_filter_grid, ActivationRecorder, actor_distribution,
+    td_error_hist, snapshot_vector
+)
+
+# --- helper: find first Conv2d in a module tree ---
+import torch.nn as nn
+def first_conv(module: nn.Module):
+    for m in module.modules():
+        if isinstance(m, nn.Conv2d):
+            return m
+    return None
 
 def train(config):
     """
@@ -50,7 +63,7 @@ def train(config):
 
     wandb.init(
         project="ddpg-painter",             
-        name="first_500steps_explore-2",               #first_500steps_explore
+        name="added_weights_viz",         
         config=config              
     )
 
@@ -124,8 +137,8 @@ def train(config):
     )
 
     # Sync target networks
-    #actor_target.load_state_dict(actor.state_dict())
-    #critic_target.load_state_dict(critic.state_dict())
+    actor_target.load_state_dict(actor.state_dict())
+    critic_target.load_state_dict(critic.state_dict())
 
     # Set optimizers
     actor_optimizer = torch.optim.Adam(
@@ -150,6 +163,55 @@ def train(config):
         noise=noise,
         config=config
     )
+
+    # BEGIN WEIGHTS VIZ: setup for hooks, trackers, and initial snapshot
+    modules_to_watch = {}
+    # Try to hook FIRST conv blocks for canvas/target encoders in Actor
+    # Adjust these lines if your model uses different attribute names.
+    # hook first convs from both encoders (if found)
+    try:
+        conv1_a = first_conv(actor.model.image_encoder_1)
+        modules_to_watch["actor_enc1_firstconv"] = conv1_a
+    except Exception:
+        pass
+
+    try:
+        conv1_b = first_conv(actor.model.image_encoder_2)
+        modules_to_watch["actor_enc2_firstconv"] = conv1_b
+    except Exception:
+        pass
+
+    # hook first activation in merged MLP (best for dead-ReLU % & feature snapshots)
+    try:
+        first_activation = None
+        if hasattr(actor.model, "merge_network") and isinstance(actor.model.merge_network, nn.Sequential):
+            for m in actor.model.merge_network:
+                if isinstance(m, (nn.ReLU, nn.LeakyReLU, nn.Tanh)):
+                    first_activation = m
+                    break
+        if first_activation is not None:
+            modules_to_watch["actor_merge_act0"] = first_activation
+    except Exception:
+        pass
+
+    actrec = ActivationRecorder(modules_to_watch)
+    wchg_actor  = WeightChangeTracker(actor)
+    wchg_critic = WeightChangeTracker(critic)
+
+    # Optional: gradient-flow hook out of the agent (requires tiny 1-liner in DDPGAgent)
+    def _viz_grad():
+        names_a, gf_a = gradient_flow(actor)
+        names_c, gf_c = gradient_flow(critic)
+        wandb.log({
+            "grad_flow/actor_mean_abs_grad": sum(gf_a)/max(len(gf_a),1),
+            "grad_flow/critic_mean_abs_grad": sum(gf_c)/max(len(gf_c),1),
+        })
+    agent.viz_after_backward = _viz_grad  
+
+    # “before training” snapshot to confirm weights actually change later
+    w0_actor  = snapshot_vector(actor)
+    w0_critic = snapshot_vector(critic)
+    # END WEIGHTS VIZ
 
     # Setup logging
     os.makedirs("logs", exist_ok=True)
@@ -378,9 +440,81 @@ def train(config):
                 total2 = t5-t4
                 print("(in train.py) Training Time: ", total2)
 
-                # log to make sure actor/critic are updated every step 
-                """with open("logs/training_calls.log", "a") as f:
-                    f.write(f"Episode {episode + 1}, Step {env.used_strokes}: agent.train() called\n")"""
+                # BEGIN WEIGHTS VIZ: lightweight, step-based logging
+                step_i = env.used_strokes
+
+                # 1) update ratios
+                ratios_a = wchg_actor.step(actor)
+                ratios_c = wchg_critic.step(critic)
+                if ratios_a:
+                    wandb.log({
+                        "update_ratio/actor_mean": sum(ratios_a.values())/len(ratios_a),
+                        "update_ratio/critic_mean": sum(ratios_c.values())/len(ratios_c),
+                        "global_step": step_i,
+                        "episode": episode + 1
+                    })
+
+                # 2) actor distributions
+                if hasattr(actor, "last_logits") and actor.last_logits is not None and step_i % 50 == 0:
+                    dist = actor_distribution(actor.last_logits, discrete=True)
+                    wandb.log({
+                        "actor/probs_hist": wandb.Histogram(dist["probs"]),
+                        "global_step": step_i,
+                        "episode": episode + 1
+                    })
+                if hasattr(actor, "last_actions") and isinstance(actor.last_actions, torch.Tensor) and step_i % 50 == 0:
+                    acts = actor.last_actions.detach().cpu()
+                    for i in range(acts.size(-1)):
+                        wandb.log({
+                            f"actor/actions_dim_{i}": wandb.Histogram(acts[..., i]),
+                            "global_step": step_i,
+                            "episode": episode + 1
+                        })
+
+                # 3) occasional layer stats
+                if step_i % 200 == 0:
+                    for d in layer_stats(actor)[:6]:
+                        wandb.log({
+                            f"weights/actor/{d['name']}_w_mean": d["w_mean"],
+                            f"weights/actor/{d['name']}_w_std":  d["w_std"],
+                            "global_step": step_i,
+                            "episode": episode + 1
+                        })
+                    for d in layer_stats(critic)[:6]:
+                        wandb.log({
+                            f"weights/critic/{d['name']}_w_mean": d["w_mean"],
+                            f"weights/critic/{d['name']}_w_std":  d["w_std"],
+                            "global_step": step_i,
+                            "episode": episode + 1
+                        })
+
+                # 4) filters & feature maps
+                if step_i % 500 == 0:
+                    try:
+                        if conv1_a is not None and hasattr(conv1_a, "weight"):
+                            grid = conv_filter_grid(conv1_a.weight, max_filters=64)
+                            wandb.log({"filters/enc1_firstconv": wandb.Image(grid),
+                                    "global_step": step_i, "episode": episode + 1})
+                    except Exception:
+                        pass
+                    try:
+                        if conv1_b is not None and hasattr(conv1_b, "weight"):
+                            grid = conv_filter_grid(conv1_b.weight, max_filters=64)
+                            wandb.log({"filters/enc2_firstconv": wandb.Image(grid),
+                                    "global_step": step_i, "episode": episode + 1})
+                    except Exception:
+                        pass
+
+                    for name in list(modules_to_watch.keys()):
+                        grid = actrec.feature_map_grid(name, max_maps=64)
+                        dead = actrec.dead_rate(name)
+                        if grid is not None:
+                            wandb.log({f"feats/{name}": wandb.Image(grid),
+                                    "global_step": step_i, "episode": episode + 1})
+                        if dead is not None:
+                            wandb.log({f"dead_relu/{name}": dead,
+                                    "global_step": step_i, "episode": episode + 1})
+                # END WEIGHTS VIZ
 
                 # Move to next state
                 # canvas = (B, C, H, W)
@@ -502,5 +636,14 @@ def train(config):
                 "Episode vs Reward": episode_reward,
                 "Episode": episode + 1
             })
-            
+        
+        # BEGIN WEIGHTS VIZ: final sanity deltas (did anything actually change?)
+        w1_actor  = snapshot_vector(actor)
+        w1_critic = snapshot_vector(critic)
+        wandb.log({
+            "sanity/actor_delta_norm": (w1_actor - w0_actor).norm().item(),
+            "sanity/critic_delta_norm": (w1_critic - w0_critic).norm().item()
+        })
+        # END WEIGHTS VIZ
+           
         print("Training complete.")

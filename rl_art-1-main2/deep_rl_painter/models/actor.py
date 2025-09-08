@@ -86,6 +86,10 @@ class Actor(nn.Module):
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu")
         self.to(self.device)
+        
+        # (optional) initialize attrs used by the logger
+        self.last_logits = None     # (B, nails) BEFORE softmax
+        self.last_actions = None    # (B, 5) for r,g,b,w,o
 
     def forward(self, input_image_1, input_image_2, action_input):
         """
@@ -116,21 +120,11 @@ class Actor(nn.Module):
         nail_logits = out[:, :self.out_neurons - 5]           # (B, nails)
         stroke_params = out[:, self.out_neurons - 5:]         # (B, 5)
 
+        # stash for W&B visualization
+        self.last_logits  = nail_logits.detach()        # keep logits for clean probs plots
+        self.last_actions = stroke_params.detach()      # (B,5) for histograms
+
         nail_probs = torch.softmax(nail_logits, dim=-1)       # probs for next nail
-
-        # Normalization - actor.py
-        #import pdb
-        #pdb.set_trace()
-        # out of every single batch, get the first 2 columns
-        """direction = out[:, :2]
-        norm = torch.norm(direction, dim=1)
-        normalized_direction = direction / (norm.unsqueeze(1) + 1e-16)
-        out = torch.cat([normalized_direction, out[:, 2:]], dim=1)"""
-
-        # Log output shape and values from Actor
-        """with open("logs/model/actor_output.log", "a") as f:
-            f.write(f"Action shape: {out.shape}, Values: {out.detach().cpu().numpy().tolist()}\n")"""
-        #print(f"Action shape: {out.shape}, Values: {out.detach().cpu().numpy().tolist()}\n")
 
         #Output: nail_logits (probabilities over all nails)
         # shape: (B, n_nails), for action pred it'll be (1, 180)

@@ -54,7 +54,8 @@ class DDPGAgent:
         
         self.resized_target = None  # cache for resized target image
 
-        #os.makedirs("logs/model", exist_ok=True)
+        # train.py may set this to a function that logs grad-flow to W&B
+        self.viz_after_backward = None
 
     # resize canvas and target to 224x224 before passing into networks
     # runs on gpu because all inputs given later are tensors
@@ -133,75 +134,74 @@ class DDPGAgent:
         return action_idx
 
     def update_actor_critic(self, target_image):
-        """
-        Train actor and critic networks using sampled transitions from the replay buffer.
-        """
         if len(self.replay_buffer) < self.config["batch_size"]:
             return
 
-        B = self.config["batch_size"]
-        nails = self.config["nails"]
+        B      = self.config["batch_size"]
+        nails  = self.config["nails"]
 
-        # Sample replay buffer
+        # ----- Sample replay buffer -----
         canvas, current_idx, action_idx, next_canvas, rewards, dones = self.replay_buffer.sample(B)
+        current_idx = current_idx.view(-1)  # (B,)
+        action_idx  = action_idx.view(-1)   # (B,)
 
-        # Convert indices to one-hot vectors
-        # indices are already torch tensors of shape (B,) and dtype long, as F.one_hot() expects
-        current_idx = current_idx.view(-1)  # ensures shape (B,)
-        action_idx = action_idx.view(-1)
-        #current_onehot = F.one_hot(current_idx, nails).float().to(self.device)  # (B, nails)
-        current_onehot = F.one_hot(current_idx, nails).float().to(self.device)
-        next_onehot = F.one_hot(action_idx, nails).float().to(self.device)     # (B, nails)
+        # One-hots
+        prev_onehot   = F.one_hot(current_idx, nails).float().to(self.device)   # previous action at s_t
+        action_onehot = F.one_hot(action_idx,  nails).float().to(self.device)   # taken action at s_t
 
-        # Convert target image, resize to 244x244, and repeat for batch (one target per sample)
-        # target image is only resized once for the entire run here, but
-        # if there is a new target image for each episode, do this in train loop once per episde - 
-        # if agent.resized_target is None:
-        #   agent.resized_target = agent.resize_input(target_image)
-        #   agent.train(agent.resized_target)
+        # ----- Resize & target caching -----
         if self.resized_target is None:
-            #if isinstance(target_image, np.ndarray):
-            #    target_image = torch.from_numpy(target_image).float()
-            #target_image = target_image.to(self.device)
             self.resized_target = self.resize_input(target_image)
-        target_resized = self.resized_target.repeat(B, 1, 1, 1)
-
-        # resize canvases to 224x224
-        canvas_resized = self.resize_input(canvas)
+        target_resized      = self.resized_target.repeat(B, 1, 1, 1)
+        canvas_resized      = self.resize_input(canvas)
         next_canvas_resized = self.resize_input(next_canvas)
 
-        # ====== Critic Target Calculation ======
+        # ====== Critic Target ======
         with torch.no_grad():
-            # add stroke parameters instead of _ here, later
-            nail_probs, _ = self.actor_target(next_canvas_resized, target_resized, next_onehot)
-            sampled_idx = torch.argmax(nail_probs, dim=1)  # (B,)
-            sampled_onehot = F.one_hot(sampled_idx, nails).float().to(self.device)  # (B, nails)
+            # For s_{t+1}, the "prev action" is the action taken at s_t
+            next_probs, _ = self.actor_target(
+                next_canvas_resized, target_resized, action_onehot
+            )
+            next_dist = torch.distributions.Categorical(probs=(next_probs + 1e-8))
+            next_a    = next_dist.sample()  # (B,)
+            next_onehot = F.one_hot(next_a, nails).float().to(self.device)  # (B, nails)
 
-            target_Q = self.critic_target(next_canvas_resized, target_resized, sampled_onehot)
-            target_Q = rewards + self.config["gamma"] * target_Q * (1 - dones)
+            target_Q = self.critic_target(next_canvas_resized, target_resized, next_onehot)  # (B,1)
+            target_Q = rewards + self.config["gamma"] * target_Q * (1 - dones) # (B,1)
 
-        # ====== Critic Update ======
-        current_Q = self.critic(canvas_resized, target_resized, next_onehot)
+        # ====== Critic Update (use the *taken* action at s_t) ======
+        current_Q   = self.critic(canvas_resized, target_resized, action_onehot)           # (B,1)
         critic_loss = F.mse_loss(current_Q, target_Q)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
+        if self.viz_after_backward is not None:
+            self.viz_after_backward()
         self.critic_optimizer.step()
 
-        # ====== Actor Update ======
-        nail_probs_pred, _ = self.actor(canvas_resized, target_resized, current_onehot)
-        pred_idx = torch.argmax(nail_probs_pred, dim=1)  # (B,)
-        pred_onehot = F.one_hot(pred_idx, nails).float().to(self.device)
+        # ====== Actor Update (stochastic policy gradient with Q) ======
+        # π(a|s_t) using prev_onehot at s_t
+        nail_probs, _ = self.actor(canvas_resized, target_resized, prev_onehot)  # (B, nails)
+        dist   = torch.distributions.Categorical(probs=(nail_probs + 1e-8))
+        a_samp = dist.sample()                                                   # (B,)
+        a_onehot = F.one_hot(a_samp, nails).float().to(self.device)              # (B, nails)
 
-        actor_loss = -self.critic(canvas_resized, target_resized, pred_onehot).mean()
+        # Q(s_t, a_samp); detach so only actor updates here
+        Q_sa = self.critic(canvas_resized, target_resized, a_onehot).detach()    # (B,1)
+        logp = dist.log_prob(a_samp).unsqueeze(1)                                 # (B,1)
+
+        actor_loss = -(logp * Q_sa).mean()
 
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
+        if self.viz_after_backward is not None:
+            self.viz_after_backward()
         self.actor_optimizer.step()
 
-        # ====== Soft Update Target Networks ======
+        # ====== Soft Updates ======
         self.soft_update(self.critic, self.critic_target, self.config["tau"])
-        self.soft_update(self.actor, self.actor_target, self.config["tau"])
+        self.soft_update(self.actor,  self.actor_target,  self.config["tau"])
+
 
 
     def train(self, target_image):

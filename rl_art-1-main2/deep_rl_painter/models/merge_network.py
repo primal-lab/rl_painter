@@ -55,6 +55,7 @@ class MergedNetwork(nn.Module):
         super().__init__()
 
         self.image_encoder_model = image_encoder_model
+        self.image_encoder_model_2 = image_encoder_model_2
         self.pretrained = pretrained
 
         if fine_tune_encoder_2 is None:
@@ -82,7 +83,6 @@ class MergedNetwork(nn.Module):
         self.merged_network = None
         self._initialize_network()
         #self.custom_encoder_2 = custom_encoder_2
-        self.image_encoder_model_2 = image_encoder_model_2
         #!self.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
     def _initialize_network(self) -> None:
@@ -114,7 +114,7 @@ class MergedNetwork(nn.Module):
             )
         else:
             self.image_encoder_2 = get_image_encoder(
-                model_name=self.image_encoder_model,
+                model_name=self.image_encoder_model_2,
                 pretrained=self.pretrained,
                 fine_tune=self.fine_tune_encoder_2,
                 in_channels=self.in_channels
