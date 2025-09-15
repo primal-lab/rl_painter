@@ -215,10 +215,10 @@ class MergedNetwork(nn.Module):
         features_1 = self.image_encoder_1(image1)
         features_2 = self.image_encoder_2(image2)
 
-        if isinstance(features_1, tuple):
+        """if isinstance(features_1, tuple):
             features_1 = features_1[0]
         if isinstance(features_2, tuple):
-            features_2 = features_2[0]
+            features_2 = features_2[0]"""
 
         # Concatenate the features
         merged_features = torch.cat((features_1, features_2), dim=1)

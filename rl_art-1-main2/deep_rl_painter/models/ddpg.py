@@ -22,6 +22,7 @@ import os
 import torch
 import torch.nn.functional as F
 import numpy as np
+import time
 
 class DDPGAgent:
     def __init__(self, actor, critic, actor_target, critic_target,
@@ -155,7 +156,8 @@ class DDPGAgent:
         # ----- Resize & target caching -----
         if self.resized_target is None:
             self.resized_target = self.resize_input(target_image)
-        target_resized      = self.resized_target.repeat(B, 1, 1, 1)
+        #target_resized      = self.resized_target.repeat(B, 1, 1, 1)
+        target_resized = self.resized_target.expand(B, -1, -1, -1)
         canvas_resized      = self.resize_input(canvas)
         next_canvas_resized = self.resize_input(next_canvas)
 
@@ -177,8 +179,8 @@ class DDPGAgent:
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        if self.viz_after_backward is not None:
-            self.viz_after_backward()
+        #if self.viz_after_backward is not None:
+        #    self.viz_after_backward()
         self.critic_optimizer.step()
         self.last_critic_loss = critic_loss.detach().item()
 
@@ -197,8 +199,8 @@ class DDPGAgent:
 
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
-        if self.viz_after_backward is not None:
-            self.viz_after_backward()
+        #if self.viz_after_backward is not None:
+        #    self.viz_after_backward()
         self.actor_optimizer.step()
         self.last_actor_loss = actor_loss.detach().item()
 

@@ -214,7 +214,7 @@ class PaintingEnv(gym.Env):
         )
         t1 = time.time()
         total = t1-t0
-        print("(in env.step) Update Canvas Time: ", total)
+        #print("(in env.step) Update Canvas Time: ", total)
         
         self.used_strokes += 1
         
@@ -252,7 +252,7 @@ class PaintingEnv(gym.Env):
         )
         t3 = time.time()
         total1 = t3-t2
-        print("(in env.step) Reward Time: ", total1)
+        #print("(in env.step) Reward Time: ", total1)
 
         done = self.used_strokes >= self.max_strokes
 

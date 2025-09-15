@@ -71,7 +71,7 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
     current_latent = get_latent_representation(current_canvas, device)
     t1 = time.time()
     total1 = t1-t0
-    print("(in reward.py) current_latent time: ", total1)
+    #print("(in reward.py) current_latent time: ", total1)
 
     # range of cosine sim = [-1,1] -> 1 being most similar
     prev_r = calculate_cosine_similarity(CACHED_PREV_LATENT, TARGET_LATENT)
@@ -329,7 +329,7 @@ def get_latent_representation(image, device):
         image = PREPROCESS(image)  # returns [B=1, 3, n_px, n_px] on GPU, normalized
         t3 = time.time()
         total2 = t3-t2
-        print("(in reward.py) preprocess Time: ", total2)
+        # preprocess Time: ", total2)
 
     except Exception as e:
         print(f"Error in preprocessing: {e}")
@@ -341,7 +341,7 @@ def get_latent_representation(image, device):
         latent_representation = CLIP_MODEL.encode_image(image)
         t5 = time.time()
         total3 = t5-t4
-        print("(in reward.py) encode_image Time: ", total3)
+        #print("(in reward.py) encode_image Time: ", total3)
         latent_representation = torch.flatten(
             latent_representation, 1)  # Flatten to a 1D tensor
 
