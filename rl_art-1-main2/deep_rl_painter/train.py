@@ -52,7 +52,7 @@ def train(config):
 
     wandb.init(
         project="ddpg-painter",             
-        name="weights_viz+clean_logs",  #weights_viz+clean_logs - consider this as (weights before) fixing model training
+        name="gumbel_softmax",  #weights_viz+clean_logs - consider this as (weights before) fixing model training
         config=config              
     )
     

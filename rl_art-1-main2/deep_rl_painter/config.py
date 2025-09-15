@@ -81,4 +81,6 @@ config = {
     # resume from last saved model
     "resume": False,
 
+    "gumbel_tau": 1.0,
+
 }

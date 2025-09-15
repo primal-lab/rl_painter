@@ -187,6 +187,8 @@ class MergedNetwork(nn.Module):
         # Add hidden layers
         for hidden_size in self.hidden_layers:
             layers.append(nn.Linear(input_size, hidden_size))
+            #nn.BatchNorm1d()
+            layers.append(nn.BatchNorm1d(hidden_size))
             layers.append(activation)
             input_size = hidden_size  # Update input size for the next layer
 

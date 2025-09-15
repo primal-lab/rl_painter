@@ -124,12 +124,12 @@ class Actor(nn.Module):
         self.last_logits  = nail_logits.detach()        # keep logits for clean probs plots
         self.last_actions = stroke_params.detach()      # (B,5) for histograms
 
-        nail_probs = torch.softmax(nail_logits, dim=-1)       # probs for next nail
+        #nail_probs = torch.softmax(nail_logits, dim=-1)       # probs for next nail
 
         #Output: nail_logits (probabilities over all nails)
         # shape: (B, n_nails), for action pred it'll be (1, 180)
         # [0.1, 0.003, 0.9, ......] 180 for nails
-        return nail_probs, stroke_params
+        return nail_logits, stroke_params
 
     def save_model(self, path):
         """

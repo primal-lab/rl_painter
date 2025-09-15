@@ -57,6 +57,10 @@ class DDPGAgent:
         # train.py may set this to a function that logs grad-flow to W&B
         self.viz_after_backward = None
 
+        # decides gumbel or softmax in select_action
+        self.use_gumbel_in_select = True       # runtime choice; doesn't affect training
+        self.gumbel_tau = config["gumbel_tau"]
+
     # resize canvas and target to 224x224 before passing into networks
     # runs on gpu because all inputs given later are tensors
     def resize_input(self, x, size=(224, 224)):
@@ -81,23 +85,23 @@ class DDPGAgent:
 
         # canvas = target_image = (B, C, H, W) = already tensors from train.py
 
-        """if isinstance(prev_action, np.ndarray):
-            prev_action = torch.from_numpy(prev_action).float() # convert to tensor
-        if prev_action.ndim == 1:
-            prev_action = prev_action.unsqueeze(0)  # (2,) → (1, 2)
-        # prev_action = prev_action.to(self.device)"""
-
         self.actor.eval()
         with torch.no_grad():
             canvas_resized = self.resize_input(canvas)  # (1, C, 224, 224)
             target_resized = self.resize_input(target_image)
-            nail_probs, stroke_params = self.actor(canvas_resized, target_resized, prev_action_onehot) 
-            action_idx = torch.argmax(nail_probs, dim=-1).item()         # index of best nail 
-            # Log actor output shape and values
-            #with open("logs/model/actor_actions.log", "a") as f:
-            #    f.write(f"Action shape: {out.shape}, Values: {out.tolist()}\n")
+            nail_logits, stroke_params = self.actor(canvas_resized, target_resized, prev_action_onehot) 
+            
+            if self.use_gumbel_in_select:
+                # Sample a soft vector (hard=False), then pick the argmax index
+                a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)  # (1, nails)
+                action_idx = a_soft.argmax(dim=-1).item()
+            else:
+                # Deterministic: softmax -> argmax
+                nail_probs = torch.softmax(nail_logits, dim=-1)                           # (1, nails)
+                action_idx = nail_probs.argmax(dim=-1).item()
+
         self.actor.train()
-        print ("Action idx(argmax)", action_idx)
+        #print ("Action idx(argmax)", action_idx)
         return action_idx
 
     def act(self, canvas, target_image, prev_action_idx, noise_scale=0.01,episode=0, step=0):
@@ -137,17 +141,16 @@ class DDPGAgent:
         if len(self.replay_buffer) < self.config["batch_size"]:
             return
 
-        B      = self.config["batch_size"]
-        nails  = self.config["nails"]
+        B     = self.config["batch_size"]
+        nails = self.config["nails"]
 
         # ----- Sample replay buffer -----
         canvas, current_idx, action_idx, next_canvas, rewards, dones = self.replay_buffer.sample(B)
-        current_idx = current_idx.view(-1)  # (B,)
-        action_idx  = action_idx.view(-1)   # (B,)
+        current_idx = current_idx.view(-1)
+        action_idx  = action_idx.view(-1)
 
-        # One-hots
-        prev_onehot   = F.one_hot(current_idx, nails).float().to(self.device)   # previous action at s_t
-        action_onehot = F.one_hot(action_idx,  nails).float().to(self.device)   # taken action at s_t
+        prev_onehot   = F.one_hot(current_idx, nails).float().to(self.device)  # (B, nails) at s_t
+        action_onehot = F.one_hot(action_idx,  nails).float().to(self.device)  # (B, nails) a_t (buffer)
 
         # ----- Resize & target caching -----
         if self.resized_target is None:
@@ -156,54 +159,52 @@ class DDPGAgent:
         canvas_resized      = self.resize_input(canvas)
         next_canvas_resized = self.resize_input(next_canvas)
 
-        # ====== Critic Target ======
+        # ====== Critic Target (Gumbel soft action at s_{t+1}) ======
         with torch.no_grad():
-            # For s_{t+1}, the "prev action" is the action taken at s_t
-            next_probs, _ = self.actor_target(
-                next_canvas_resized, target_resized, action_onehot
-            )
-            next_dist = torch.distributions.Categorical(probs=(next_probs + 1e-8))
-            next_a    = next_dist.sample()  # (B,)
-            next_onehot = F.one_hot(next_a, nails).float().to(self.device)  # (B, nails)
+            # prev action for next state is the action taken at s_t
+            next_logits, _ = self.actor_target(next_canvas_resized, target_resized, action_onehot)  # (B, nails)
+            next_a_soft = F.gumbel_softmax(next_logits, tau=self.gumbel_tau, hard=False)            # (B, nails)
+            target_Q = self.critic_target(next_canvas_resized, target_resized, next_a_soft)         # (B,1)
+            target_Q = rewards + self.config["gamma"] * target_Q * (1 - dones)                      # (B,1)
 
-            target_Q = self.critic_target(next_canvas_resized, target_resized, next_onehot)  # (B,1)
-            target_Q = rewards + self.config["gamma"] * target_Q * (1 - dones) # (B,1)
-
-        # ====== Critic Update (use the *taken* action at s_t) ======
-        current_Q   = self.critic(canvas_resized, target_resized, action_onehot)           # (B,1)
+        # ====== Critic Update (use the *taken* action one-hot at s_t) ======
+        current_Q   = self.critic(canvas_resized, target_resized, action_onehot)   # (B,1)
         critic_loss = F.mse_loss(current_Q, target_Q)
+
+        # change hard = true so gumbel also looks like one hot (or) 
+        # Q_soft = self.critic(canvas_resized, target_resized, next_a_soft)
+        # critic_loss = 0.5 * F.mse_loss(current_Q, target_Q) + 0.5 * F.mse_loss(Q_soft, target_Q)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        if self.viz_after_backward is not None: #log
+        if self.viz_after_backward is not None:
             self.viz_after_backward()
         self.critic_optimizer.step()
-        self.last_critic_loss = critic_loss.detach().item() #log
+        self.last_critic_loss = critic_loss.detach().item()
 
-        # ====== Actor Update (stochastic policy gradient with Q) ======
-        # π(a|s_t) using prev_onehot at s_t
-        nail_probs, _ = self.actor(canvas_resized, target_resized, prev_onehot)  # (B, nails)
-        dist   = torch.distributions.Categorical(probs=(nail_probs + 1e-8))
-        a_samp = dist.sample()                                                   # (B,)
-        a_onehot = F.one_hot(a_samp, nails).float().to(self.device)              # (B, nails)
+        # ====== Actor Update (Gumbel soft action at s_t) ======
+        nail_logits, _ = self.actor(canvas_resized, target_resized, prev_onehot)   # (B, nails)
+        a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)    # (B, nails)
 
-        # Q(s_t, a_samp); detach so only actor updates here
-        Q_sa = self.critic(canvas_resized, target_resized, a_onehot).detach()    # (B,1)
-        logp = dist.log_prob(a_samp).unsqueeze(1)                                 # (B,1)
+        # Deterministic policy gradient style: maximize Q(s, a_theta)
+        Q_sa = self.critic(canvas_resized, target_resized, a_soft)                 # (B,1)
+        actor_loss = -Q_sa.mean()
 
-        actor_loss = -(logp * Q_sa).mean()
+        # Optional: tiny entropy bonus to reduce early collapse
+        # probs = torch.softmax(nail_logits, dim=-1)
+        # entropy = -(probs * probs.clamp_min(1e-8).log()).sum(dim=-1).mean()
+        # actor_loss = actor_loss - 1e-3 * entropy
 
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
-        if self.viz_after_backward is not None: #log
+        if self.viz_after_backward is not None:
             self.viz_after_backward()
         self.actor_optimizer.step()
-        self.last_actor_loss = actor_loss.detach().item()  #log
+        self.last_actor_loss = actor_loss.detach().item()
 
-        # ====== Soft Updates ======
+        # ====== Soft target updates ======
         self.soft_update(self.critic, self.critic_target, self.config["tau"])
         self.soft_update(self.actor,  self.actor_target,  self.config["tau"])
-
 
 
     def train(self, target_image):
