@@ -35,9 +35,9 @@ config = {
     #critic needs to learn a bit faster than the actor so the actor chases a good value surface instead of a noisy one.
     
     #"buffer_size": 100000, same thing as below
-    "replay_buffer_capacity": 100000,
+    "replay_buffer_capacity": 500000,
 
-    "batch_size": 64,                       # if training is unstable (reward jumps/loss spikes), =32
+    "batch_size": 128,                       # if training is unstable (reward jumps/loss spikes), =32
     "gamma": 0.99,
     "tau": 0.005,
     "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
