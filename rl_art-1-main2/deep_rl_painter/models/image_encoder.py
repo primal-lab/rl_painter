@@ -88,7 +88,7 @@ class ImageEncoder(nn.Module):
         elif self.in_channels != 3:
             raise ValueError(f"Invalid number of input channels: {self.in_channels}. ResNet only supports 1 or 3 channels.")
         # Remove the last fully connected layer
-        model = nn.Sequential(*list(model.children())[:-2], nn.Flatten())
+        model = nn.Sequential(*list(model.children())[:-2]) #no flatten here
         return model
 
     def _get_efficientnet(self, model_name: str) -> nn.Module:
@@ -201,7 +201,8 @@ class ImageEncoder(nn.Module):
             torch.Tensor: Image features.
         """
         #print("(in image_encoder.py)ImageEncoder got input of shape:", x.shape)
-        features = self.cnn(x)
+        features = self.cnn(x) # (B, C, h, w)
+        features = F.adaptive_avg_pool2d(features, (1, 1)).flatten(1)  # -> (B, C) e.g., (B, 512) for resnet18
     
         # Log output shape from image encoder
         """os.makedirs("logs/model", exist_ok=True)

@@ -24,6 +24,7 @@ import torch.nn.functional as F
 import numpy as np
 import time
 from torch.cuda.amp import autocast, GradScaler
+from torch.nn.utils import clip_grad_norm_
 
 class DDPGAgent:
     def __init__(self, actor, critic, actor_target, critic_target,
@@ -73,6 +74,15 @@ class DDPGAgent:
 
         self.scaler = GradScaler()  #  (for mixed precision)
 
+        # --- hack actor ---
+        self.use_script = True   # set False to go back to normal behavior
+        self.script_ptr = 0
+        script_path = os.path.join(os.path.dirname(__file__), "index.txt")
+        with open(script_path, "r") as f:
+            txt = f.read()
+        # assume comma-separated integers; convert to 0-based once
+        self.script = [int(x.strip()) - 1 for x in txt.split(",") if x.strip()]
+
 
     # resize canvas and target to 224x224 before passing into networks
     # runs on gpu because all inputs given later are tensors
@@ -83,7 +93,7 @@ class DDPGAgent:
         # corners-false = Pixel centers are scaled proportionally inside the new size.
         return F.interpolate(x, size=size, mode='bilinear', align_corners=False)
 
-    def select_action(self, canvas, target_image, prev_soft):
+    def select_action(self, canvas, target_image, prev_action_onehot):
         """
         Use the actor network to select the best action (nail index) given the current state.
 
@@ -99,33 +109,32 @@ class DDPGAgent:
         # canvas = target_image = (B, C, H, W) = already tensors from train.py
 
         # ensure shape (1, nails)
-        if prev_soft.dim() == 1:
+        """if prev_soft.dim() == 1:
             prev_soft_in = prev_soft.unsqueeze(0)  # (1, nails)
         else:
-            prev_soft_in = prev_soft  # assume already (1, nails)
+            prev_soft_in = prev_soft  # assume already (1, nails)"""
 
         self.actor.eval()
         with torch.no_grad(), autocast(dtype=torch.float16):
             canvas_resized = self.resize_input(canvas)  # (1, C, 224, 224)
             target_resized = self.resize_input(target_image)
-            nail_logits, stroke_params = self.actor(canvas_resized, target_resized, prev_soft_in)  # (1, nails)) 
+            nail_logits, stroke_params = self.actor(canvas_resized, target_resized, prev_action_onehot)  # (1, nails)) 
             
             if self.use_gumbel_in_select:
                 # Sample a soft vector (hard=False), then pick the argmax index
                 a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)  # (1, nails)
+                action_idx = a_soft.argmax(dim=-1).item()
             # not being used, only applies gumbel as of now
             else:
                 # Deterministic: softmax -> argmax
-                a_soft = torch.softmax(nail_logits, dim=-1)
-
-            action_idx = int(a_soft.argmax(dim=-1).item())
-            action_soft = a_soft.squeeze(0).float().detach().to(self.device)    
+                nail_probs = torch.softmax(nail_logits, dim=-1)                           # (1, nails)
+                action_idx = nail_probs.argmax(dim=-1).item()
 
         self.actor.train()
         #print ("Action idx(argmax)", action_idx)
-        return action_idx, action_soft
+        return action_idx
 
-    def act(self, canvas, target_image, prev_soft, noise_scale=0.01,episode=0, step=0):
+    def act(self, canvas, target_image, prev_action_idx, noise_scale=0.01,episode=0, step=0):
         """"
         Behavior policy used in train.py.
         Choose action with warmup + epsilon exploration.
@@ -134,12 +143,22 @@ class DDPGAgent:
         Returns:
             action_idx (int), action_soft (nails,)
         """
+        if self.use_script:
+            # reset for each new episode so we replay from the start
+            if step == 0:
+                self.script_ptr = 0
+            
+            if self.script_ptr >= len(self.script):
+                self.script_ptr = len(self.script) - 1  # or: raise RuntimeError("script finished")
+            
+            idx = int(self.script[self.script_ptr])
+            self.script_ptr += 1
+            return idx
+
         nails = self.config["nails"]
         # for the first episode, the first 500 steps are just exploration (p=1)
         if episode < 1 and step < 500:
-            action_idx = int(torch.randint(0, nails, ()).item())
-            action_soft = torch.zeros(nails, device=self.device, dtype=torch.float32)
-            action_soft[action_idx] = 1.0
+            action_idx = np.random.randint(0, self.config["nails"])
         else:
             p = np.random.rand()  # uniform in [0, 1]
             #p = 0
@@ -147,13 +166,12 @@ class DDPGAgent:
             # more exploration in initial stages, more exploitation later on
             if p > 0.8:
                 # exploration: pick a random nail index (20%)
-                action_idx = int(torch.randint(0, nails, ()).item())
-                action_soft = torch.zeros(nails, device=self.device, dtype=torch.float32)
-                action_soft[action_idx] = 1.0
+                action_idx = np.random.randint(0, self.config["nails"])
             else:
                 #exploitation: use policy network (prev_soft is already a gumbel vector)
-                action_idx, action_soft = self.select_action(canvas, target_image, prev_soft)
-        return action_idx, action_soft
+                one_hot_prev = F.one_hot(torch.tensor([prev_action_idx]), num_classes=nails).float().to(self.device)
+                action_idx = self.select_action(canvas, target_image, one_hot_prev)
+        return action_idx
 
     def update_actor_critic(self, target_image):
         """
@@ -169,11 +187,18 @@ class DDPGAgent:
         nails = self.config["nails"]
 
          # ----- Sample replay buffer -----
-        canvas, prev_soft, action_soft, next_canvas, rewards, dones = self.replay_buffer.sample(B)
-        # shapes:
-        # canvas, next_canvas: (B, C, H, W)
-        # prev_soft, action_soft: (B, nails)
-        # rewards, dones: (B, 1)
+        canvas, current_idx, action_idx, next_canvas, rewards, dones = self.replay_buffer.sample(B)
+        current_idx = current_idx.view(-1)
+        action_idx  = action_idx.view(-1)
+
+        prev_onehot   = F.one_hot(current_idx, nails).float().to(self.device)  # (B, nails) at s_t
+        action_onehot = F.one_hot(action_idx,  nails).float().to(self.device)  # (B, nails) a_t (buffer)
+
+        # freeze BatchNorm in targets - needs to be in eval mode
+        # use the frozen stats instead of updating with every sampled batch.
+        # because hidden layers has batch norm
+        self.actor_target.eval()
+        self.critic_target.eval()
 
         # ----- Resize & target caching -----
         if self.resized_target is None:
@@ -185,20 +210,29 @@ class DDPGAgent:
 
         # ===================== Critic Update =====================
         self.critic_optimizer.zero_grad(set_to_none=True)
-        with torch.no_grad(), autocast(dtype=torch.float16):
-            next_logits, _ = self.actor_target(next_canvas_resized, target_resized, action_soft)  # (B, nails)
-            next_a_soft = F.gumbel_softmax(next_logits, tau=self.gumbel_tau, hard=False)
-            target_Q = self.critic_target(next_canvas_resized, target_resized, next_a_soft)
+        #with torch.no_grad(), autocast(dtype=torch.float16):
+        with torch.no_grad():
+            # Next action for target: use argmax ONE-HOT (matches discrete env) w/o gumbel
+            next_logits, _ = self.actor_target(next_canvas_resized, target_resized, action_onehot)  # (B, nails)
+            next_idx = next_logits.argmax(dim=-1)
+            next_onehot  = F.one_hot(next_idx, nails).float()
+            target_Q = self.critic_target(next_canvas_resized, target_resized, next_onehot)
             target_Q = rewards + self.config["gamma"] * target_Q * (1 - dones)
 
-        with autocast(dtype=torch.float16):
-            current_Q   = self.critic(canvas_resized, target_resized, action_soft) 
-            critic_loss = F.mse_loss(current_Q, target_Q)
+        #with autocast(dtype=torch.float16):
+            # Current Q for the action that was actually executed
+            # detach = the onehots are from replay buffer, so the actor shouldn't be optimized optimized to reproduce past replay actions
+        current_Q   = self.critic(canvas_resized, target_resized, action_onehot.detach()) 
+        critic_loss = F.mse_loss(current_Q, target_Q)
 
-        self.scaler.scale(critic_loss).backward()
-        self.scaler.step(self.critic_optimizer)
-        self.scaler.update()
-        self.last_critic_loss = float(critic_loss.detach().cpu())
+        """if not torch.isfinite(critic_loss):
+            print("[WARN] critic_loss not finite; skipping step")
+            self.critic_optimizer.zero_grad(set_to_none=True)
+            return"""
+        
+        critic_loss.backward()
+        clip_grad_norm_(self.critic.parameters(), self.config.get("clip_grad_norm", 1.0))  # ← comment out to disable
+        self.critic_optimizer.step()
 
         if self.viz_after_backward is not None:
             try:
@@ -208,16 +242,15 @@ class DDPGAgent:
 
         # ===================== Actor Update =====================
         self.actor_optimizer.zero_grad(set_to_none=True)
-        with autocast(dtype=torch.float16):
-            nail_logits, _ = self.actor(canvas_resized, target_resized, prev_soft)  # (B, nails)
-            a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)   # (B, nails)
-            Q_sa = self.critic(canvas_resized, target_resized, a_soft)                # (B,1)
-            actor_loss = -Q_sa.mean()
+        #with autocast(dtype=torch.float16): 
+        nail_logits, _ = self.actor(canvas_resized, target_resized, prev_onehot)  # (B, nails)
+        a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)   # (B, nails)
+        Q_sa = self.critic(canvas_resized, target_resized, a_soft)                # (B,1)
+        actor_loss = -Q_sa.mean()
 
-        self.scaler.scale(actor_loss).backward()
-        self.scaler.step(self.actor_optimizer)
-        self.scaler.update()
-        self.last_actor_loss = float(actor_loss.detach().cpu())
+        actor_loss.backward()
+        clip_grad_norm_(self.actor.parameters(), self.config.get("clip_grad_norm", 1.0))   # ← comment out to disable
+        self.actor_optimizer.step()
 
         if self.viz_after_backward is not None:
             try:

@@ -56,7 +56,7 @@ def train(config):
     if is_main:
         wandb.init(
             project="ddpg-painter",
-            name="check/try",
+            name="test-1",
             config=config
         )
 
@@ -77,6 +77,7 @@ def train(config):
     # ----- Build models -----
     actor = Actor(
         image_encoder_model=config["model_name"],
+        image_encoder_model_2=config["model_name"],
         actor_network_input=config["nails"],  # one-hot prev point
         in_channels=config["canvas_channels"],
         out_neurons=config["nails"] + 5
@@ -84,6 +85,7 @@ def train(config):
 
     critic = Critic(
         image_encoder_model=config["model_name"],
+        image_encoder_model_2=config["model_name"],
         actor_network_input=config["nails"],  # one-hot current point
         in_channels=config["canvas_channels"],
         out_neurons=1
@@ -91,6 +93,7 @@ def train(config):
 
     actor_target = Actor(
         image_encoder_model=config["model_name"],
+        image_encoder_model_2=config["model_name"],
         actor_network_input=config["nails"],
         in_channels=config["canvas_channels"],
         out_neurons=config["nails"] + 5
@@ -98,6 +101,7 @@ def train(config):
 
     critic_target = Critic(
         image_encoder_model=config["model_name"],
+        image_encoder_model_2=config["model_name"],
         actor_network_input=config["nails"],
         in_channels=config["canvas_channels"],
         out_neurons=1
@@ -210,17 +214,22 @@ def train(config):
         done = False
 
         canvas, current_idx = env.reset()
+        #print(f"(in train.py) raw canvas: type={type(canvas)}, shape={getattr(canvas, 'shape', None)}")
 
         if isinstance(canvas, np.ndarray) and canvas.ndim == 3:
             canvas = np.transpose(canvas, (2, 0, 1))
             canvas = canvas[np.newaxis, :, :, :]
         elif isinstance(canvas, torch.Tensor) and canvas.ndim == 3:
             canvas = canvas.permute(2, 0, 1).unsqueeze(0).contiguous()
+            #print(f"[in train.py] after permute+unsqueeze: {canvas.shape}")
+            
 
         canvas_tensor = torch.from_numpy(canvas).float().to(device) if isinstance(canvas, np.ndarray) else canvas.float().to(device)
+        #print(f"[in train.py] canvas_tensor: {canvas_tensor.shape}, device={canvas_tensor.device}")
+        #print(f"[in train.py] target_image: {target_image.shape}, device={target_image.device}")
 
         # ---- t = 0: build prev_soft from current_idx as one-hot ----
-        nails = config["nails"]
+        """nails = config["nails"]
         if isinstance(current_idx, int):
             prev_soft = torch.zeros(nails, device=device, dtype=torch.float32)
             prev_soft[current_idx] = 1.0
@@ -231,14 +240,14 @@ def train(config):
         else:
             # fallback if no index given by env.reset()
             # uniform probability distribution over all nails
-            prev_soft = torch.full((nails,), 1.0 / nails, device=device, dtype=torch.float32)
+            prev_soft = torch.full((nails,), 1.0 / nails, device=device, dtype=torch.float32)"""
 
         while not done:
             current_episode = episode
 
             t0 = time.time()
-            #action_idx = agent.act(canvas_tensor, target_image, current_idx, noise_scale, episode=current_episode, step=env.used_strokes)
-            action_idx, action_soft = agent.act(canvas_tensor, target_image, prev_soft, noise_scale, episode=current_episode, step=env.used_strokes)
+            action_idx = agent.act(canvas_tensor, target_image, current_idx, noise_scale, episode=current_episode, step=env.used_strokes)
+            #action_idx, action_soft = agent.act(canvas_tensor, target_image, prev_soft, noise_scale, episode=current_episode, step=env.used_strokes)
             t1 = time.time()
             if is_main:
                 print("(in train.py) Action Time: ", t1 - t0)
@@ -258,8 +267,8 @@ def train(config):
 
             replay_buffer.store(
                 canvas_for_buffer,
-                prev_soft,               # (nails,)
-                action_soft,             # (nails,)
+                current_idx,             
+                action_idx,             
                 next_canvas,
                 reward,
                 done
@@ -307,7 +316,7 @@ def train(config):
                 img = 255 - img
                 episode_frames.append(img)
 
-            if ((episode + 1) == 1 or (episode + 1) % 50 == 0) and env.used_strokes == config["max_strokes"] - 1 and is_main:
+            if ((episode + 1) == 1 or (episode + 1) % 2 == 0) and env.used_strokes == config["max_strokes"] - 1 and is_main:
                 step_dir = f"step_outputs/episode_{episode + 1}"
                 os.makedirs(step_dir, exist_ok=True)
                 save_path = os.path.join(step_dir, f"final_step_{config['max_strokes']}.png")
@@ -315,8 +324,8 @@ def train(config):
                 canvas_to_save = canvas_to_save.permute(1, 2, 0).contiguous()
                 save_canvas(canvas_to_save, save_path)
 
-            #current_idx = action_idx
-            prev_soft = action_soft
+            current_idx = action_idx
+            #prev_soft = action_soft
             episode_reward += reward
 
             if is_main:

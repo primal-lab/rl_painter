@@ -6,6 +6,10 @@ from typing import List
 from torchsummary import summary
 from .image_encoder import get_image_encoder
 
+# >>> DDP EDIT: import DDP
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist  # only used for rank/world helpers
+
 # Turn off all warnings
 warnings.filterwarnings("ignore")
 
@@ -142,17 +146,18 @@ class MergedNetwork(nn.Module):
         # Example input for size check
         device = next(encoder.parameters()).device
         #dummy_input = torch.randn(1, self.in_channels, 1024, 1024, device=device)
-        dummy_input = torch.randn(1, self.in_channels, 224, 224, device=device)  # Assume 224x224 input
-        if next(encoder.parameters()).is_cuda:
-            dummy_input = dummy_input.to(next(encoder.parameters()).device)
+        # Assume 224x224 input for speed - canvas & target are resized to 224*224
+        dummy_input = torch.randn(1, self.in_channels, 224, 224, device=device) 
+        
+        #if next(encoder.parameters()).is_cuda:
+        #    dummy_input = dummy_input.to(next(encoder.parameters()).device)
 
         with torch.no_grad():
             dummy_output = encoder(dummy_input)
+        #if isinstance(dummy_output, tuple):
+        #    dummy_output = dummy_output[0]  # Handle cases like InceptionV3
 
-        if isinstance(dummy_output, tuple):
-            dummy_output = dummy_output[0]  # Handle cases like InceptionV3
-
-        return dummy_output.shape[1]
+        return dummy_output.shape[1] # C (e.g., 512 for resnet18)
 
     def _build_merged_network(self) -> nn.Sequential:
         """
@@ -188,7 +193,8 @@ class MergedNetwork(nn.Module):
         for hidden_size in self.hidden_layers:
             layers.append(nn.Linear(input_size, hidden_size))
             #nn.BatchNorm1d()
-            layers.append(nn.BatchNorm1d(hidden_size))
+            #layers.append(nn.BatchNorm1d(hidden_size))
+            layers.append(nn.LayerNorm(hidden_size))
             layers.append(activation)
             input_size = hidden_size  # Update input size for the next layer
 
@@ -208,17 +214,16 @@ class MergedNetwork(nn.Module):
         Returns:
             torch.Tensor: The output of the merged network.
         """
-        #print(f"[DEBUG] action_params shape: {action_params.shape}")
-        #print(f"[DEBUG] action_params values:\n{action_params}")
 
         # Pass each image through its encoder
         features_1 = self.image_encoder_1(image1)
         features_2 = self.image_encoder_2(image2)
 
-        """if isinstance(features_1, tuple):
-            features_1 = features_1[0]
-        if isinstance(features_2, tuple):
-            features_2 = features_2[0]"""
+        # === DEBUG SHAPES ===
+        """if not dist.is_initialized() or dist.get_rank() == 0:  # only main GPU prints
+            print(f"[MergedNetwork] canvas_feat: {features_1.shape}")
+            print(f"[MergedNetwork] target_feat: {features_2.shape}")
+            print(f"[MergedNetwork] action_onehot: {action_params.shape}")  """  
 
         # Concatenate the features
         merged_features = torch.cat((features_1, features_2), dim=1)
