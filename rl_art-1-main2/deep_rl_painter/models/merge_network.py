@@ -5,6 +5,7 @@ import warnings
 from typing import List
 from torchsummary import summary
 from .image_encoder import get_image_encoder
+from .action_encoder import ActionEncoder
 
 # >>> DDP EDIT: import DDP
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -35,7 +36,9 @@ class MergedNetwork(nn.Module):
                  custom_encoder,
                  custom_encoder_2,
                  activation_function,
-                 in_channels) -> None:
+                 in_channels,
+                 action_emb_dim: int = 256, # output size
+                 action_hidden: int = 256) -> None:
         """
         Args:
             image_encoder_model (str): Name of the CNN architecture to use for both image encoders
@@ -85,15 +88,17 @@ class MergedNetwork(nn.Module):
         self.activation_function = activation_function
         self.encoder_output_size = None
         self.merged_network = None
+        self.action_emb_dim = action_emb_dim
+        self.action_hidden = action_hidden
+        
         self._initialize_network()
-        #self.custom_encoder_2 = custom_encoder_2
-        #!self.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
     def _initialize_network(self) -> None:
         """
         Initializes the dual image processor network.
         """
-
+        # Create two image encoders with the same architecture
+        # 1st 
         if self.use_custom_encoder:
             if self.custom_encoder:
                 self.image_encoder_1 = get_image_encoder(
@@ -102,7 +107,6 @@ class MergedNetwork(nn.Module):
                     in_channels=self.in_channels
                 )
         else:
-            # Create two image encoders with the same architecture
             self.image_encoder_1 = get_image_encoder(
                 model_name=self.image_encoder_model,
                 pretrained=self.pretrained,
@@ -110,7 +114,11 @@ class MergedNetwork(nn.Module):
                 in_channels=self.in_channels
             )
 
-        if self.use_custom_encoder_2:
+        # 2nd
+        # SHARE WEIGHTS: use the exact same instance for the second branch
+        self.image_encoder_2 = self.image_encoder_1
+        # if need to create 2 diff encoders (tho the same, weights not shared), follow below
+        """if self.use_custom_encoder_2:
             self.image_encoder_2 = get_image_encoder(
                 fine_tune=self.fine_tune_encoder_2,
                 custom_model=self.custom_encoder_2,
@@ -122,7 +130,20 @@ class MergedNetwork(nn.Module):
                 pretrained=self.pretrained,
                 fine_tune=self.fine_tune_encoder_2,
                 in_channels=self.in_channels
+            )"""
+
+        # action encoder
+        if self.actor_network_input and self.actor_network_input > 0:
+            self.action_encoder = ActionEncoder(
+                in_dim=self.actor_network_input,
+                out_dim=self.action_emb_dim,
+                hidden=self.action_hidden,
+                act=self.activation_function
             )
+            self.action_out_dim = self.action_emb_dim
+        else:
+            self.action_encoder = None
+            self.action_out_dim = 0
 
         # Determine the output size of the individual encoders
         self.encoder_output_size1 = self._get_encoder_output_size(
@@ -173,10 +194,12 @@ class MergedNetwork(nn.Module):
             nn.Sequential: The merged network.
         """
         layers: List[nn.Module] = []
-        input_size = self.encoder_output_size1 + self.encoder_output_size2  # Concatenated output size
+        #input_size = self.encoder_output_size1 + self.encoder_output_size2  # Concatenated output size
+        input_size = self.encoder_output_size1 + self.encoder_output_size2 + self.action_out_dim
 
-        if self.actor_network_input > 0:
-            input_size += self.actor_network_input
+
+        #if self.actor_network_input > 0:
+         #   input_size += self.actor_network_input
 
         # Select activation function
         if self.activation_function == 'ReLU':
@@ -230,7 +253,13 @@ class MergedNetwork(nn.Module):
         #if self.actor_network_input > 0:
         #    if action_params is None:
         #        raise ValueError("action_params must be provided if action_params_size > 0")
-        merged_features = torch.cat((merged_features, action_params), dim=1)
+        #merged_features = torch.cat((merged_features, action_params), dim=1)
+        
+        #if self.action_encoder is not None:
+        #    if action_params is None:
+        #        raise ValueError("action_params must be provided when actor_network_input > 0")
+        a_enc = self.action_encoder(action_params)
+        merged_features = torch.cat((merged_features, a_enc), dim=1)
 
         # Log merged feature vector shape before FC layers
         #with open("logs/model/merged_network.log", "a") as f:
@@ -260,7 +289,9 @@ def create_merged_network(image_encoder_model: str = 'resnet50',
                                 custom_encoder: nn.Module = None,
                                 custom_encoder_2: nn.Module = None,
                                 activation_function: str = 'LeakyReLU',
-                                in_channels: int = 3) -> MergedNetwork:
+                                in_channels: int = 3, 
+                                action_emb_dim: int = 256,
+                                action_hidden: int = 256,) -> MergedNetwork:
     """
     Creates a MergedNetwork instance.
 
@@ -298,7 +329,9 @@ def create_merged_network(image_encoder_model: str = 'resnet50',
         custom_encoder=custom_encoder,
         custom_encoder_2=custom_encoder_2,
         activation_function=activation_function,
-        in_channels=in_channels
+        in_channels=in_channels,
+        action_emb_dim=action_emb_dim,
+        action_hidden=action_hidden
     )
 
 if __name__ == '__main__':

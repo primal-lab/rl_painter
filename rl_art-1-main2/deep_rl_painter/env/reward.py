@@ -25,6 +25,10 @@ from config import config
 import torchvision.transforms as T
 from torchvision.transforms.functional import resize, center_crop
 from .clip_preprocess_gpu import build_gpu_preprocess
+from pytorch_msssim import ms_ssim
+import torch.nn.functional as F
+import lpips
+from .dithering import ordered_dither, _save_png01_nchw
 
 
 # target_latent
@@ -39,6 +43,11 @@ TOTAL_EPISODES = config["episodes"]
 # Global cache for latent reuse
 CACHED_PREV_LATENT = None
 LAST_EPISODE = -1
+TARGET_NORM = None
+
+LPIPS_MODEL = None
+TARGET_LPIPS = None      # cached target in LPIPS format (3ch, [-1,1])
+TARGET_DITHERED = None
 
 # currently getting 3 index values
 # need the 3 (x,y) point values to use other aux functions
@@ -55,36 +64,109 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
     Returns:
         torch.Tensor: The calculated reward (shape: [batch_size, 1]).
     """
+    # 3 canvases shapes: (1, 1024, 1024, 1) -> (B, H, W, C)
+    # range: [0,255], dtype: torch.float32
+
+    # for lpips
+    #model = _lpips_model(device)
+
     # CLIP for calculating cosine similarity
-    global TARGET_LATENT
-    global CACHED_PREV_LATENT, LAST_EPISODE
+    global TARGET_LATENT, TARGET_NORM
+    global CACHED_PREV_LATENT, LAST_EPISODE, TARGET_LPIPS, TARGET_DITHERED
+    
+    # for General Reward
+    if TARGET_NORM is None:
+        TARGET_NORM  = target_canvas.permute(0, 3, 1, 2).contiguous()
+        TARGET_NORM  = TARGET_NORM / 255.0
+        TARGET_DITHERED = ordered_dither(TARGET_NORM, cell=8)
 
-    if TARGET_LATENT is None:
-        TARGET_LATENT = get_latent_representation(target_canvas, device)
+    # for lpips
+    """if TARGET_LPIPS is None or (current_episode is not None and current_episode != LAST_EPISODE):
+        with torch.no_grad():
+            TARGET_LPIPS = target_canvas.permute(0,3,1,2).contiguous()
+            TARGET_LPIPS = TARGET_LPIPS / 255.0  # (B,H,W,C)[0..255] -> (B,C,H,W)[0,1]
+            # ensure exactly 3 channels
+            c = TARGET_LPIPS.shape[1]
+            if c == 1:
+                TARGET_LPIPS = TARGET_LPIPS.repeat(1, 3, 1, 1)   # gray -> RGB
+            elif c == 3:
+                pass  # already RGB 
+            else:
+                raise ValueError(f"Expected 1 or 3 channels, got {c}")
+            # map to [-1,1] expected by LPIPS from [0,1]    
+            TARGET_LPIPS = TARGET_LPIPS  * 2.0 - 1.0
+        LAST_EPISODE = current_episode if current_episode is not None else LAST_EPISODE"""
+       
+    # ===== no grad: CLIP + MS-SSIM =====
+    with torch.no_grad():
+        """if TARGET_LATENT is None:
+            TARGET_LATENT = get_latent_representation(target_canvas, device)
 
-    # Reset cache at the beginning of a new episode
-    if current_episode != LAST_EPISODE:
-        CACHED_PREV_LATENT = get_latent_representation(prev_canvas, device)
-        LAST_EPISODE = current_episode
+        # Reset cache at the beginning of a new episode
+        if current_episode != LAST_EPISODE:
+            CACHED_PREV_LATENT = get_latent_representation(prev_canvas, device)
+            LAST_EPISODE = current_episode
 
-    t0 = time.time()
-    current_latent = get_latent_representation(current_canvas, device)
-    t1 = time.time()
-    total1 = t1-t0
-    #print("(in reward.py) current_latent time: ", total1)
+        #t0 = time.time()
+        current_latent = get_latent_representation(current_canvas, device)
+        #t1 = time.time()
+        #total1 = t1-t0
+        #print("(in reward.py) current_latent time: ", total1)
 
-    # range of cosine sim = [-1,1] -> 1 being most similar
-    prev_r = calculate_cosine_similarity(CACHED_PREV_LATENT, TARGET_LATENT)
-    current_r = calculate_cosine_similarity(current_latent, TARGET_LATENT)
+        # range of cosine sim = [-1,1] -> 1 being most similar
+        prev_r = calculate_cosine_similarity(CACHED_PREV_LATENT, TARGET_LATENT)
+        current_r = calculate_cosine_similarity(current_latent, TARGET_LATENT)"""
 
-    total_reward = (current_r - prev_r).item() * 10 # range = [-2, 2]
+        # intermediate reward
+        # range = [-2, 2] *100
+        #ir = float((current_r - prev_r).item() * 100)
+        
+        # general reward - ms_ssim (or use LPIPS instead)
+        current_norm = current_canvas.permute(0, 3, 1, 2).contiguous() # (B, C, H, W)
+        current_norm = current_norm / 255.0 # range [0, 1] as expected by ms_ssim
+        
+        # lpips
+        # LPIPS expects 3 channels and [-1,1]
+        """if current_norm.shape[1] == 1:
+            current_norm = current_norm.repeat(1,3,1,1)
+            #TARGET_NORM  = TARGET_NORM.repeat(1,3,1,1)
+        # [0,1] -> [-1,1]    
+        current_norm = current_norm * 2.0 - 1.0
+        #TARGET_NORM  = TARGET_NORM  * 2.0 - 1.0"""
+        
+        # ms_ssim range = [0,1] -> 1 being most similar
+        # *10
+        #gr = float(ms_ssim(current_norm, TARGET_NORM, data_range=1.0, size_average=True) * 10)
+
+        #mse [0,1] -> 0 represents more similar so 1-mse
+        #mse = F.mse_loss(current_norm, TARGET_NORM, reduction="none").flatten(1).mean(dim=1)  # shape: (B,)
+        #reward_abs = (1.0 - mse).clamp(0.0, 1.0)  # higher = more similar
+
+        dithered_canvas = ordered_dither(current_norm, cell=8)
+        mse = F.mse_loss(dithered_canvas, TARGET_DITHERED, reduction="none").flatten(1).mean(dim=1) 
+        reward_abs = (1.0 - mse).clamp(0.0, 1.0)  # higher = more similar
+        if (int(current_episode) == 0) and (int(current_step) == 4999):
+            out_dir = "debug/halftone_first"
+            _save_png01_nchw(TARGET_DITHERED,  f"{out_dir}/target_dithered_ep1_step1.png")
+            _save_png01_nchw(dithered_canvas,  f"{out_dir}/canvas_dithered_ep1_step1.png")
+
+    #total_reward = ir + gr
+    #total_reward = gr
+    #total_reward = current_r.item()
+    total_reward = float(reward_abs.mean().item())
+    
+    # LPIPS distance; shape is (1,1,1,1) or (1,)
+    #d = model(current_norm, TARGET_LPIPS)
+    # lpips output range [0, inf], 0 being most similar
+    # so now total reward range = (0,1], 1 being the highest reward (most similar)
+    #total_reward = (1.0 - d).item()  # 1 when d=0; 0.5 when d=1; →0 as d→∞
 
     # penalize staying on the same nail (current_idx == action_idx)
     if prev_idx == current_idx:
-        total_reward -= 100.0
+        total_reward -= 0.5 # (try 25, 10, 1)
 
     # update cache
-    CACHED_PREV_LATENT = current_latent
+    #CACHED_PREV_LATENT = current_latent
 
     # log
     """log_file = "logs/reward_breakdown.csv"
@@ -93,9 +175,17 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
         writer = csv.writer(file)
         if os.stat(log_file).st_size == 0:
             writer.writerow(["prev canvas cos sim", "current canvas cos sim", "clip/cosine reward", "total_reward"])
-        writer.writerow([prev_r.item(), current_r.item(), (current_r - prev_r).item(), total_reward])"""
+        writer.writerow([prev_r.item(), current_r.item(), (current_r - prev_r).item(), total_reward])"""  
     
     return total_reward 
+
+def _lpips_model(device):
+    global LPIPS_MODEL
+    if LPIPS_MODEL is None or next(LPIPS_MODEL.parameters()).device != torch.device(device):
+        LPIPS_MODEL = lpips.LPIPS(net='alex').to(device).eval() #'vgg' or 'squeeze', alex is default & fast
+        for p in LPIPS_MODEL.parameters():
+            p.requires_grad_(False)
+    return LPIPS_MODEL   
 
 #def segments_reward(start, end, segments_map):
 def segments_reward(start, end, target_canvas):
@@ -318,6 +408,8 @@ def get_latent_representation(image, device):
         PREPROCESS = build_gpu_preprocess(CLIP_MODEL.visual.input_resolution, device)
     # print(PREPROCESS) -> controls resizing to 224*224 already 
 
+    # canvas shape (B, H, W, C)
+    # clip needs (B, C, H, W) or (C, H, W)
     if len(image.shape) == 4 and (image.shape[1] != 1 or image.shape[1] != 3):
         image = image.permute(0, 3, 1, 2)
     try:

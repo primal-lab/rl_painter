@@ -12,3 +12,4 @@ torchsummary
 lpips
 git+https://github.com/openai/CLIP.git
 wandb[media]
+pytorch-msssim

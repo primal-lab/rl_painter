@@ -39,7 +39,7 @@ def log_step_to_table(episode_table, step, reward, canvas):
     """
     img = canvas.detach().cpu().permute(1, 2, 0).numpy()  # (H, W, C)
     img = np.clip(img, 0, 255).astype(np.uint8)
-    img = 255 - img  # same inversion as save_canvas
+    #img = 255 - img  # same inversion as save_canvas
 
     # ✅ Convert (H, W, 1) → (H, W)
     if img.ndim == 3 and img.shape[2] == 1:

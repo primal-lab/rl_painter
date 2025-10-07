@@ -52,7 +52,7 @@ def init_canvas(image_shape: Tuple[int, int] | Tuple[int, int, int],
 def update_canvas_torch(canvas: torch.Tensor,
                         start_point: Tuple[float, float],
                         end_point: Tuple[float, float],
-                        color: Union[float, Tuple[float, float, float]] = 1.0,
+                        color: Union[float, Tuple[float, float, float]] = 0.0,
                         width: int = 1,
                         channels: int = 1) -> torch.Tensor:
     """
@@ -90,8 +90,9 @@ def update_canvas_torch(canvas: torch.Tensor,
     coords = torch.tensor(points, dtype=torch.long, device=device).T  # (2, N) - convert to tensor
 
     # 90% of the pixel (color) stays the same, and 10% is replaced with the new color
-    alpha = 0.1  # 10% opacity 
+    alpha = 0.3  # 10% opacity 
 
+    # chnaged to black strokes, white canvas
     # Determine per-channel stroke color -> canvas (c, h, w)
     if isinstance(color, (int, float)): # single value like 255 or 0.5
         # if c=3 (rgb), if color = 255 and canvas is RGB, stroke_color = [255, 255, 255]
@@ -186,15 +187,16 @@ def save_canvas(canvas: Union[np.ndarray, torch.Tensor], path: str) -> bool:
         print("Error: Canvas must be a NumPy array or GPU torch.Tensor.")
         return False
 
-    if canvas.ndim == 3 and canvas.shape[2] in [1, 3]:
+    """if canvas.ndim == 3 and canvas.shape[2] in [1, 3]:
         inverted_canvas = 255 - canvas
     elif canvas.ndim == 2:
         inverted_canvas = 255 - canvas
     else:
         print(f"Error: Invalid NumPy canvas shape {canvas.shape} for saving.")
-        return False
+        return False"""
 
-    saved = cv2.imwrite(path, inverted_canvas)
+    #saved = cv2.imwrite(path, inverted_canvas)
+    saved = cv2.imwrite(path, canvas)
     if not saved:
         print(f"Error: Could not save image to {path}")
     return saved

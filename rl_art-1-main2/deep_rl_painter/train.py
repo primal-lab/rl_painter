@@ -56,7 +56,7 @@ def train(config):
     if is_main:
         wandb.init(
             project="ddpg-painter",
-            name="test-1",
+            name="actor_fixed_rotate(r=1-mse(halftone_ordered_dithered)-penalty=-0.5)",
             config=config
         )
 
@@ -125,7 +125,12 @@ def train(config):
     critic_optimizer = torch.optim.Adam(critic.parameters(), lr=config["critic_lr"])
 
     # Replay buffer & noise
-    replay_buffer = ReplayBuffer(capacity=config["replay_buffer_capacity"], device=device)
+    replay_buffer = ReplayBuffer(capacity=config["replay_buffer_capacity"], 
+    device=device,
+    log_mode="per_rank",   # or "main_only" or "off"
+    rank=rank,
+    is_main=is_main)
+    
     noise = OUNoise(config["action_dim"])
 
     # Build agent
@@ -271,7 +276,9 @@ def train(config):
                 action_idx,             
                 next_canvas,
                 reward,
-                done
+                done,
+                episode=current_episode,
+                step=env.used_strokes
             )
 
             agent.episode = episode + 1
@@ -313,7 +320,7 @@ def train(config):
             if is_video_episode and is_main:
                 img = canvas_tensor[0].detach().cpu().permute(1, 2, 0).numpy()
                 img = np.clip(img, 0, 255).astype(np.uint8)
-                img = 255 - img
+                #img = 255 - img
                 episode_frames.append(img)
 
             if ((episode + 1) == 1 or (episode + 1) % 2 == 0) and env.used_strokes == config["max_strokes"] - 1 and is_main:
