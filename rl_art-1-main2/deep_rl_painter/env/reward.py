@@ -103,28 +103,29 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
         mse_curr = F.mse_loss(curr_d, TARGET_DITHERED, reduction="none").flatten(1).mean(dim=1) # (B,) 
         
         # ---- Convert to similarity s=1-MSE, clamp into [0,1) to avoid log(0) ---- 
-        s_curr = (1.0 - mse_curr).clamp(0.0, 1.0 - 1e-12) # (B,) 
+        #s_curr = (1.0 - mse_curr).clamp(0.0, 1.0 - 1e-12) # (B,) 
         
         # ---- Shaping: g(s) = -log(1 - s + eps) = -log1p(-s + (eps-0)) 
         # log1p is more stable than log(1 - s + eps) 
         # when s->1 (almost perfect similarity), 1-s -> 0 
         # log(0) is udnefiend -> gives -inf and breaks gradients so +eps for safety 
-        g_curr = -torch.log1p(-s_curr + eps) # (B,) 
+        #g_curr = -torch.log1p(-s_curr + eps) # (B,) 
 
-        if CACHED_G_PREV is None:
+        """if CACHED_G_PREV is None:
             # step 0 reward = 0 cause no prev step, first step is not accounted for
             # for other art styles, if you want the first action to be rewarded, compare against the initial blank canvas
             reward_step = torch.zeros_like(g_curr)
         else:
             reward_step = g_curr - CACHED_G_PREV
 
-        CACHED_G_PREV = g_curr.detach()    
+        CACHED_G_PREV = g_curr.detach()    """
         
         # ---- Step reward = improvement in shaped similarity ---- 
         # positive if you improved; ~0 if no change; negative if you got worse 
         #reward_step = g_curr - g_prev # (B,) 
     
-    total_reward = float(reward_step.mean().item()) * 100
+    #total_reward = float(reward_step.mean().item()) * 100
+    total_reward = float(1-mse_curr.mean().item())
     
     # anti-repeat penalty 
     if prev_idx == current_idx: 

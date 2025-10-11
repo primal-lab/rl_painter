@@ -56,7 +56,7 @@ def train(config):
     if is_main:
         wandb.init(
             project="ddpg-painter",
-            name="trail",  
+            name="try_hack_actor(r=1-mse(ditehred canvas,tar)_fixed logging)",  
             #hack_actor_fixed_rotate(r=delta(-log1p(-s+E))*100)_penalty=-0.5
             config=config
         )
@@ -289,11 +289,16 @@ def train(config):
             agent.train(target_image)  
             t5 = time.time()
             if is_main:
-                print("(in train.py) Training Time: ", t5 - t4)
+                print("(in train.py) Training Time: ", t5 - t4) 
 
-            step_i = env.used_strokes
-            if ((step_i % LOG_EVERY_STEPS) == 0) or done:
-                # Only rank 0 logs to W&B
+            #here    
+            #print("(in train.py) env.used_strokes ", env.used_strokes)
+            global_step = int(episode * config["max_strokes"] + env.used_strokes) 
+            
+            #step_i = env.used_strokes
+            # ---- Periodic logs ----
+            if ((env.used_strokes % LOG_EVERY_STEPS) == 0) or done:
+                # every 200 steps
                 if is_main:
                     gf_actor = getattr(agent, "gf_actor_mean", None)
                     gf_critic = getattr(agent, "gf_critic_mean", None)
@@ -302,16 +307,19 @@ def train(config):
                     actor_upd_ratio = update_ratio_gpu(actor_prev_vec, actor_curr_vec)
                     critic_upd_ratio = update_ratio_gpu(critic_prev_vec, critic_curr_vec)
 
-                    wandb.log({
-                        "grad_flow/actor_mean_abs_grad": float(gf_actor) if gf_actor is not None else 0.0,
-                        "grad_flow/critic_mean_abs_grad": float(gf_critic) if gf_critic is not None else 0.0,
-                        "update_ratio/actor_mean": float(actor_upd_ratio),
-                        "update_ratio/critic_mean": float(critic_upd_ratio),
-                        "loss/actor": getattr(agent, "last_actor_loss", None),
-                        "loss/critic": getattr(agent, "last_critic_loss", None),
-                        "global_step": step_i,
-                        "episode": episode + 1,
-                    })
+                    wandb.log(
+                        {
+                            "grad_flow/actor_mean_abs_grad": float(gf_actor) if gf_actor is not None else 0.0,
+                            "grad_flow/critic_mean_abs_grad": float(gf_critic) if gf_critic is not None else 0.0,
+                            "update_ratio/actor_mean": float(actor_upd_ratio),
+                            "update_ratio/critic_mean": float(critic_upd_ratio),
+                            "loss/actor": getattr(agent, "last_actor_loss", None),
+                            "loss/critic": getattr(agent, "last_critic_loss", None),
+                            #"episode": int(episode + 1),
+                            #"env_used_strokes": int(env.used_strokes),
+                        },
+                        step=global_step,  # use same step here too
+                    )
 
                     actor_prev_vec = actor_curr_vec.detach().clone()
                     critic_prev_vec = critic_curr_vec.detach().clone()
@@ -337,6 +345,8 @@ def train(config):
             #prev_soft = action_soft
             episode_reward += reward
 
+            #here  
+
             if is_main:
                 os.makedirs("/storage/axp4488/rl_painter/logs", exist_ok=True)
                 with open("/storage/axp4488/rl_painter/logs/step_rewards.csv", mode="a", newline="") as file:
@@ -346,7 +356,8 @@ def train(config):
                     writer.writerow([episode + 1, env.used_strokes, reward])
                 print(f"Episode {episode + 1} | Step {env.used_strokes} | Step Reward: {reward}")
 
-                wandb.log({"Step vs Reward (all episodes)": reward})
+                #wandb.log({"Step vs Reward (all episodes)": reward})
+                wandb.log({"Step vs Reward (all episodes)": reward}, step=global_step)
 
         # ---- End of episode ----
         if is_video_episode and episode_frames and is_main:
