@@ -102,7 +102,7 @@ class Actor(nn.Module):
         Returns:
             torch.Tensor: Output of the model.
         """
-        os.makedirs("logs/model", exist_ok=True) 
+        #os.makedirs("logs/model", exist_ok=True) 
 
         # Log input shapes: canvas, target, prev action
         #with open("logs/model/actor_input_shapes.log", "a") as f:

@@ -56,7 +56,8 @@ def train(config):
     if is_main:
         wandb.init(
             project="ddpg-painter",
-            name="actor_fixed_rotate(r=1-mse(halftone_ordered_dithered)-penalty=-0.5)",
+            name="trail",  
+            #hack_actor_fixed_rotate(r=delta(-log1p(-s+E))*100)_penalty=-0.5
             config=config
         )
 
@@ -127,7 +128,7 @@ def train(config):
     # Replay buffer & noise
     replay_buffer = ReplayBuffer(capacity=config["replay_buffer_capacity"], 
     device=device,
-    log_mode="per_rank",   # or "main_only" or "off"
+    log_mode="main_only",   # or "main_only" or "off" or "per_rank"
     rank=rank,
     is_main=is_main)
     
@@ -323,8 +324,9 @@ def train(config):
                 #img = 255 - img
                 episode_frames.append(img)
 
-            if ((episode + 1) == 1 or (episode + 1) % 2 == 0) and env.used_strokes == config["max_strokes"] - 1 and is_main:
-                step_dir = f"step_outputs/episode_{episode + 1}"
+            if ((episode + 1) == 1 or (episode + 1) % 10 == 0) and env.used_strokes == config["max_strokes"] - 1 and is_main:
+                os.makedirs("/storage/axp4488/rl_painter/logs", exist_ok=True)
+                step_dir = f"/storage/axp4488/rl_painter/logs/step_outputs/episode_{episode + 1}"
                 os.makedirs(step_dir, exist_ok=True)
                 save_path = os.path.join(step_dir, f"final_step_{config['max_strokes']}.png")
                 canvas_to_save = canvas[0]  # (C, H, W)
@@ -336,7 +338,8 @@ def train(config):
             episode_reward += reward
 
             if is_main:
-                with open("logs/step_rewards.csv", mode="a", newline="") as file:
+                os.makedirs("/storage/axp4488/rl_painter/logs", exist_ok=True)
+                with open("/storage/axp4488/rl_painter/logs/step_rewards.csv", mode="a", newline="") as file:
                     writer = csv.writer(file)
                     if episode == 0 and env.used_strokes == 1:
                         writer.writerow(["episode", "step", "reward"])
@@ -355,7 +358,8 @@ def train(config):
         running_avg = np.mean(list(scores_window))
 
         if is_main:
-            with open("logs/episode_rewards.csv", mode="a", newline="") as file:
+            os.makedirs("/storage/axp4488/rl_painter/logs", exist_ok=True)
+            with open("/storage/axp4488/rl_painter/logs/episode_rewards.csv", mode="a", newline="") as file:
                 writer = csv.writer(file)
                 if episode == 0:
                     writer.writerow(["episode", "episode_reward"])

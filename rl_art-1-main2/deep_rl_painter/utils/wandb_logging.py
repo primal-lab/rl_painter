@@ -4,12 +4,13 @@ import os
 import torch
 import imageio
 
-def log_canvas_video(episode, frames, fps=15, save_dir="logs/episode_videos"):
+def log_canvas_video(episode, frames, fps=15, save_dir="/storage/axp4488/rl_painter/logs/episode_videos"):
     """
     Creates and logs a GIF for an episode (grayscale-safe).
     Frames should be (H, W) or (H, W, 1).
     """
     os.makedirs(save_dir, exist_ok=True)
+    #os.makedirs("/storage/axp4488/rl_painter/logs", exist_ok=True)
     gif_path = os.path.join(save_dir, f"episode_{episode + 1}.gif")
 
     processed_frames = []

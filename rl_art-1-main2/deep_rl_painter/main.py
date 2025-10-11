@@ -48,7 +48,7 @@ def parse_args():
     parser.add_argument('--reward_method', type=str, default=config["reward_method"], help='Reward function')
 
     # Multi-GPU control
-    parser.add_argument('--num_gpus', type=int, default=4,
+    parser.add_argument('--num_gpus', type=int, default=2,
                         help='How many GPUs to use (auto-picks first N visible GPUs).')
     parser.add_argument('--gpus', type=str, default="",
                         help='Comma-separated GPU IDs to use, e.g. "0,2". If set, overrides --num_gpus.')

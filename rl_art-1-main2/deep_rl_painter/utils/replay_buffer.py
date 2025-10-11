@@ -17,7 +17,8 @@ class ReplayBuffer:
         self.rank = int(rank)
         self.is_main = (self.rank == 0) if (is_main is None) else bool(is_main)
         self.log_mode = log_mode
-        os.makedirs("logs", exist_ok=True)
+        #os.makedirs("logs", exist_ok=True)
+        os.makedirs("/storage/axp4488/rl_painter/logs", exist_ok=True)
 
     def store(self, canvas, current_idx, action_idx, next_canvas, reward, done,
               episode=None, step=None):
@@ -44,12 +45,12 @@ class ReplayBuffer:
         self.buffer.append((canvas, current_idx, action_idx, next_canvas, reward, done))
 
         # ---------- rank-aware logging ----------
-        # currenlty. log_mode = per_rank (in train.py - RB initialisation)
+        # currenlty: log_mode = main_only (in train.py - RB initialisation)
         log_path = None
         if self.log_mode == "per_rank":
-            log_path = f"logs/replay_buffer_rank{self.rank}.log"
+            log_path = f"/storage/axp4488/rl_painter/logs/replay_buffer_rank{self.rank}.log"
         elif self.log_mode == "main_only" and self.is_main:
-            log_path = "logs/replay_buffer.log"
+            log_path = "/storage/axp4488/rl_painter/logs/replay_buffer.log"
 
         if log_path is not None:
             try:
