@@ -29,108 +29,140 @@ from pytorch_msssim import ms_ssim
 import torch.nn.functional as F
 import lpips
 from .dithering import ordered_dither, _save_png01_nchw
+import wandb
+
+_IS_MAIN = int(os.environ.get("RANK", "0")) == 0
+
+def wb_log(data: dict, step: int | None = None):
+    # log only from rank0 and only if wandb is initialized
+    if _IS_MAIN and getattr(wandb, "run", None) is not None:
+        wandb.log(data, step=step)
 
 
-# target_latent
-TARGET_LATENT = None
-# model
-# preprocess
+USE_DITHERING = True   # True => dithered run, False => non-dithered run
+ACTIVE_TOTAL_KEY = "IR_mse__GR_mse"  # {"IR_mse__GR_mse","IR_mse__GR_euc","IR_euc__GR_mse","IR_euc__GR_euc"}
+
 CLIP_MODEL = None
 PREPROCESS = None
-# model, preprocess = None, None
-TOTAL_EPISODES = config["episodes"]
 
-# Global cache for latent reuse
-CACHED_PREV_LATENT = None
-LAST_EPISODE = -1
-TARGET_NORM = None
+TARGET_LATENT = None            # cached CLIP latent of target (1, D)
+TARGET_NORM = None              # (B,C,H,W) in [0,1]
+TARGET_DITHERED = None          # (B,C,H,W) in [0,1]
 
-LPIPS_MODEL = None
-TARGET_LPIPS = None      # cached target in LPIPS format (3ch, [-1,1])
-TARGET_DITHERED = None
-CACHED_G_PREV = None # -log1p function = g(x)
-LAST_EPISODE_FOR_G = -1
+# caches for intermediate-reward deltas (prev step's shaped similarities)
+CACHED_NEGLOG_MSE_PREV = None   # tensor (B,)
+CACHED_NEGLOG_L2_PREV  = None   # tensor (B,)
+LAST_EPISODE_FOR_CACHE = -1
 
-# currently getting 3 index values
-# need the 3 (x,y) point values to use other aux functions
 def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
                      prev_prev_idx, prev_idx, current_idx, center, 
                      edge_map=None, current_episode=None, current_step=None, segments_map=None):
     """
-    Calculates the reward based on the chosen reward function.
-
-    Args:
-        prev_canvas (torch.Tensor): The previous canvas state (shape: [batch_size, channels, height, width]).
-        current_canvas (torch.Tensor): The current canvas state (shape: [batch_size, channels, height, width]).
-        target_canvas (torch.Tensor): The target canvas state (shape: [batch_size, channels, height, width]).
-    Returns:
-        torch.Tensor: The calculated reward (shape: [batch_size, 1]).
+    Computes ALL reward variants, logs under 'reward_plots/*', and returns one active total as a float.
+    Assumes canvases are (B, H, W, C) in [0,255]. No eps added to logs by request.
     """
-    # 3 canvases shapes: (1, 1024, 1024, 1) -> (B, H, W, C)
-    # range: [0,255], dtype: torch.float32
+    global TARGET_LATENT, TARGET_NORM, TARGET_DITHERED
+    global CACHED_NEGLOG_MSE_PREV, CACHED_NEGLOG_L2_PREV, LAST_EPISODE_FOR_CACHE
 
-    # for lpips
-    #model = _lpips_model(device)
+    # Keep original tensors for CLIP path (expects BHWC)
+    curr_img_bhwc   = current_canvas
+    target_img_bhwc = target_canvas
 
-    # CLIP for calculating cosine similarity
-    global TARGET_LATENT, TARGET_NORM
-    global CACHED_PREV_LATENT, LAST_EPISODE, TARGET_LPIPS, TARGET_DITHERED, CACHED_G_PREV, LAST_EPISODE_FOR_G
-    
-    eps = 1e-6 
+    with torch.no_grad():
+        # Reset IR caches at new episode or at step 0
+        if (LAST_EPISODE_FOR_CACHE != int(current_episode)) or (int(current_step) == 0):
+            CACHED_NEGLOG_MSE_PREV = None
+            CACHED_NEGLOG_L2_PREV  = None
+            LAST_EPISODE_FOR_CACHE = int(current_episode)
 
-    if (LAST_EPISODE_FOR_G != current_episode) or (current_step == 0):
-        CACHED_G_PREV = None
-        LAST_EPISODE_FOR_G = current_episode
-    
-    with torch.no_grad(): 
-        # ---- Prepare current/prev normalized (B,C,H,W) in [0,1] ---- 
-        curr = current_canvas.permute(0, 3, 1, 2).contiguous() / 255.0 
-        
-        # Build TARGET_NORM/TARGET_DITHERED once 
-        if TARGET_NORM is None: 
-            TARGET_NORM = target_canvas.permute(0, 3, 1, 2).contiguous() / 255.0 
-            TARGET_DITHERED = ordered_dither(TARGET_NORM, cell=8) 
-            
-        # ---- Dither ---- 
-        curr_d = ordered_dither(curr, cell=8) 
+        # ---------- Image path (MSE) ----------
+        # (B,H,W,C) -> (B,C,H,W), normalize to [0,1]
+        curr_nchw = current_canvas.permute(0, 3, 1, 2).contiguous() / 255.0
+        if TARGET_NORM is None:
+            TARGET_NORM = target_canvas.permute(0, 3, 1, 2).contiguous() / 255.0
 
-        if (int(current_episode) == 0) and (int(current_step) == 4999):
-            out_dir = "/storage/axp4488/rl_painter/logs/halftone_reward"
-            _save_png01_nchw(TARGET_DITHERED,  f"{out_dir}/target_dithered_ep1_step1.png")
-            _save_png01_nchw(curr_d,  f"{out_dir}/canvas_dithered_ep1_step1.png")
-        
-        # ---- Compute per-batch MSE to target (lower is better) ---- 
-        mse_curr = F.mse_loss(curr_d, TARGET_DITHERED, reduction="none").flatten(1).mean(dim=1) # (B,) 
-        
-        # ---- Convert to similarity s=1-MSE, clamp into [0,1) to avoid log(0) ---- 
-        #s_curr = (1.0 - mse_curr).clamp(0.0, 1.0 - 1e-12) # (B,) 
-        
-        # ---- Shaping: g(s) = -log(1 - s + eps) = -log1p(-s + (eps-0)) 
-        # log1p is more stable than log(1 - s + eps) 
-        # when s->1 (almost perfect similarity), 1-s -> 0 
-        # log(0) is udnefiend -> gives -inf and breaks gradients so +eps for safety 
-        #g_curr = -torch.log1p(-s_curr + eps) # (B,) 
-
-        """if CACHED_G_PREV is None:
-            # step 0 reward = 0 cause no prev step, first step is not accounted for
-            # for other art styles, if you want the first action to be rewarded, compare against the initial blank canvas
-            reward_step = torch.zeros_like(g_curr)
+        # Dither toggle (affects only image-MSE computation)
+        if USE_DITHERING:
+            from .dithering import ordered_dither
+            if TARGET_DITHERED is None:
+                TARGET_DITHERED = ordered_dither(TARGET_NORM, cell=8)
+            img_curr_for_mse = ordered_dither(curr_nchw, cell=8)
+            img_targ_for_mse = TARGET_DITHERED
         else:
-            reward_step = g_curr - CACHED_G_PREV
+            img_curr_for_mse = curr_nchw
+            img_targ_for_mse = TARGET_NORM
 
-        CACHED_G_PREV = g_curr.detach()    """
-        
-        # ---- Step reward = improvement in shaped similarity ---- 
-        # positive if you improved; ~0 if no change; negative if you got worse 
-        #reward_step = g_curr - g_prev # (B,) 
-    
-    #total_reward = float(reward_step.mean().item()) * 100
-    total_reward = float(1-mse_curr.mean().item())
-    
-    # anti-repeat penalty 
-    if prev_idx == current_idx: 
-        total_reward -= 0.5 
-           
+        # Per-batch MSE (lower is better)
+        mse_curr = F.mse_loss(img_curr_for_mse, img_targ_for_mse, reduction="none").flatten(1).mean(dim=1)  # (B,)
+        neglog_mse_curr = -torch.log(mse_curr)  # no eps 
+        # Intermediate reward: delta vs previous step's shaped sim
+        if CACHED_NEGLOG_MSE_PREV is None:
+            ir_mse = torch.zeros_like(neglog_mse_curr)
+        else:
+            ir_mse = neglog_mse_curr - CACHED_NEGLOG_MSE_PREV
+        gr_mse = neglog_mse_curr
+
+        # ---------- Embedding path (CLIP Euclidean) ----------
+        if TARGET_LATENT is None:
+            TARGET_LATENT = get_latent_representation(target_img_bhwc, device)  # (1,D)
+        current_latent = get_latent_representation(curr_img_bhwc, device)       # (1,D)
+
+        l2_curr = torch.norm(current_latent - TARGET_LATENT, dim=1)  # (1,)
+        neglog_l2_curr = -torch.log(l2_curr)  # no eps 
+        if CACHED_NEGLOG_L2_PREV is None:
+            ir_euc = torch.zeros_like(neglog_l2_curr)
+        else:
+            ir_euc = neglog_l2_curr - CACHED_NEGLOG_L2_PREV
+        gr_euc = neglog_l2_curr
+
+        # ---------- Totals (2x2) ----------
+        totals = {
+            "IR_mse__GR_mse": ir_mse + gr_mse,
+            "IR_mse__GR_euc": ir_mse + gr_euc,
+            "IR_euc__GR_mse": ir_euc + gr_mse,
+            "IR_euc__GR_euc": ir_euc + gr_euc,
+        }
+        active_total = totals[ACTIVE_TOTAL_KEY]  # (B,)
+
+        total_reward = active_total.mean().item()
+        # penalty
+        if prev_idx == current_idx:
+            total_reward -= 0.5
+
+        # ---------- Update caches for next step ----------
+        CACHED_NEGLOG_MSE_PREV = neglog_mse_curr.detach()
+        CACHED_NEGLOG_L2_PREV  = neglog_l2_curr.detach()
+
+        # ---------- W&B logging (global step across episodes) ----------
+        STEPS_PER_EP = int(config.get("max_strokes", 5000))
+        global_step = int(current_episode) * STEPS_PER_EP + int(current_step)
+
+        wb_log({
+            # episode/step context
+            "reward_plots/episode": int(current_episode),
+            "reward_plots/step_in_episode": int(current_step),
+
+            # raw components
+            "reward_plots/mse_curr": mse_curr.mean().item(),
+            "reward_plots/neglog_mse_curr(gr_mse)": neglog_mse_curr.mean().item(),
+            "reward_plots/l2_curr": l2_curr.mean().item(),
+            "reward_plots/neglog_l2_curr(gr_euc)": neglog_l2_curr.mean().item(),
+
+            # intermediate rewards
+            "reward_plots/ir_mse": ir_mse.mean().item(),
+            "reward_plots/ir_euc": ir_euc.mean().item(),
+
+            # general rewards
+            "reward_plots/gr_mse": gr_mse.mean().item(),
+            "reward_plots/gr_euc": gr_euc.mean().item(),
+
+            # totals (all four for side-by-side comparison)
+            "reward_plots/total_IR_mse__GR_mse": totals["IR_mse__GR_mse"].mean().item(),
+            "reward_plots/total_IR_mse__GR_euc": totals["IR_mse__GR_euc"].mean().item(),
+            "reward_plots/total_IR_euc__GR_mse": totals["IR_euc__GR_mse"].mean().item(),
+            "reward_plots/total_IR_euc__GR_euc": totals["IR_euc__GR_euc"].mean().item(),
+        }, step=global_step)
+
     return total_reward
 
 

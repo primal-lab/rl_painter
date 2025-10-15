@@ -56,7 +56,7 @@ def train(config):
     if is_main:
         wandb.init(
             project="ddpg-painter",
-            name="try_hack_actor(r=1-mse(ditehred canvas,tar)_fixed logging)",  
+            name="hack_actor(all rewards - mse_not_ditehred)",  
             #hack_actor_fixed_rotate(r=delta(-log1p(-s+E))*100)_penalty=-0.5
             config=config
         )
