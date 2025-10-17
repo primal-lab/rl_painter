@@ -63,6 +63,7 @@ config = {
     # Canvas parameters
     #"canvas_size": (224, 224),  # (height, width)
     "canvas_size": (1024, 1024),
+    #"canvas_size": (512, 512),
     "canvas_channels": 1,  # 1 for grayscale, 3 for RGB
     "canvas_color": (255, 255, 255),  # white background
     "canvas_stroke_color": 0,  # black stroke

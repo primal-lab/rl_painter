@@ -38,132 +38,152 @@ def wb_log(data: dict, step: int | None = None):
     if _IS_MAIN and getattr(wandb, "run", None) is not None:
         wandb.log(data, step=step)
 
+# Weights / knobs
+W_SSIM, W_LPIPS, W_CLIP = 0.40, 0.40, 0.20   # combined similarity weights
+LAMBDA_IR = 0.70                              # R = λ·IR + (1-λ)·GR
 
-USE_DITHERING = True   # True => dithered run, False => non-dithered run
-ACTIVE_TOTAL_KEY = "IR_mse__GR_mse"  # {"IR_mse__GR_mse","IR_mse__GR_euc","IR_euc__GR_mse","IR_euc__GR_euc"}
-
+# Globals / caches 
 CLIP_MODEL = None
 PREPROCESS = None
+LPIPS_MODEL = None
+TARGET_SSIM_NCHW  = None   # (B,C,H,W) in [0,1]
+TARGET_LPIPS_NCHW = None   # (B,3,H,W) in [-1,1]
+TARGET_CLIP_UNIT  = None   # (1,D) unit-norm CLIP embedding of target
 
-TARGET_LATENT = None            # cached CLIP latent of target (1, D)
-TARGET_NORM = None              # (B,C,H,W) in [0,1]
-TARGET_DITHERED = None          # (B,C,H,W) in [0,1]
-
-# caches for intermediate-reward deltas (prev step's shaped similarities)
-CACHED_NEGLOG_MSE_PREV = None   # tensor (B,)
-CACHED_NEGLOG_L2_PREV  = None   # tensor (B,)
+CACHED_S_PREV     = None   # (B,) previous step's combined similarity
 LAST_EPISODE_FOR_CACHE = -1
 
+def _get_lpips(device):
+    return _lpips_model(device)
+
+def _prep_ssim(bhwc_255: torch.Tensor) -> torch.Tensor:
+    """(B,H,W,C)[0..255] -> (B,C,H,W)[0..1] for MS-SSIM."""
+    return (bhwc_255.permute(0,3,1,2).contiguous()) / 255.0
+
+def _prep_lpips(bhwc_255: torch.Tensor) -> torch.Tensor:
+    """(B,H,W,C)[0..255] -> (B,3,H,W)[-1..1] for LPIPS."""
+    x01 = (bhwc_255 / 255.0)
+    x = x01.permute(0,3,1,2).contiguous()
+    if x.size(1) == 1:
+        x = x.repeat(1,3,1,2)
+    return x * 2.0 - 1.0
+
+def _clip_unit_from_bhwc(bhwc_255: torch.Tensor, device) -> torch.Tensor:
+    """
+    Uses YOUR get_latent_representation() to fetch CLIP features, then L2-normalizes.
+    Your current implementation returns [1, D]; this wrapper keeps that interface.
+    """
+    z = get_latent_representation(bhwc_255, device)            # [1, D]
+    z = z / (z.norm(dim=-1, keepdim=True) + 1e-12)             # unit-norm
+    return z                                                   # [1, D]
+
+
+def _combined_similarity_and_components(curr_bhwc_255: torch.Tensor,
+                                        targ_bhwc_255: torch.Tensor,
+                                        device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Computes:
+      - ssim_gr    : MS-SSIM(C_t, T)          (B,), ↑ better
+      - lpips_gr   : 1 - LPIPS(C_t, T)        (B,), ↑ better
+      - clip_gr    : CLIP cosine(C_t, T)      (B,), ↑ better
+      - S_curr     : weighted combo           (B,), ↑ better
+    Returns (S_curr, ssim_gr, lpips_gr, clip_gr).
+    """
+    global TARGET_SSIM_NCHW, TARGET_LPIPS_NCHW, TARGET_CLIP_UNIT
+
+    LP = _get_lpips(device)
+
+    # --- SSIM ---
+    curr_ssim = _prep_ssim(curr_bhwc_255).to(device)                     # (B,C,H,W) [0,1]
+    if TARGET_SSIM_NCHW is None:
+        TARGET_SSIM_NCHW = _prep_ssim(targ_bhwc_255).to(device)
+    ssim_gr = ms_ssim(curr_ssim, TARGET_SSIM_NCHW, data_range=1.0, size_average=False)  # (B,)
+
+    # --- LPIPS ---
+    curr_lpips = _prep_lpips(curr_bhwc_255).to(device)
+    if TARGET_LPIPS_NCHW is None:
+        TARGET_LPIPS_NCHW = _prep_lpips(targ_bhwc_255).to(device)
+    with torch.no_grad():
+        lp = LP(curr_lpips, TARGET_LPIPS_NCHW).view(-1)  # lower = better
+    lpips_gr = 1.0 - lp.clamp(0.0, 1.0)                  # convert to ↑ better
+
+    # --- CLIP cosine ---
+    if TARGET_CLIP_UNIT is None:
+        TARGET_CLIP_UNIT = _clip_unit_from_bhwc(targ_bhwc_255, device)   # [1,D]
+    curr_clip_unit = _clip_unit_from_bhwc(curr_bhwc_255, device)         # [1,D]
+    with torch.no_grad():
+        clip_gr = (curr_clip_unit * TARGET_CLIP_UNIT).sum(dim=-1).view(-1)  # (1,) -> (B=1,)
+        clip_gr = clip_gr.clamp(-1.0, 1.0)
+
+    # --- Weighted combo ---
+    S_curr = W_SSIM*ssim_gr + W_LPIPS*lpips_gr + W_CLIP*clip_gr          # (B,)
+
+    return S_curr, ssim_gr, lpips_gr, clip_gr
+
+# Main reward
 def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
-                     prev_prev_idx, prev_idx, current_idx, center, 
+                     prev_prev_idx, prev_idx, current_idx, center,
                      edge_map=None, current_episode=None, current_step=None, segments_map=None):
     """
-    Computes ALL reward variants, logs under 'reward_plots/*', and returns one active total as a float.
-    Assumes canvases are (B, H, W, C) in [0,255]. No eps added to logs by request.
+    HYBRID reward with CLIP+LPIPS+MS-SSIM.
+    Logs:
+      - reward_plots/IR_progress
+      - reward_plots/GR_similarity
+      - reward_plots/total_hybrid
+      - reward_plots/gr_ssim        (RAW component curve)
+      - reward_plots/gr_lpips_sim   (RAW component curve)
+      - reward_plots/gr_clip_cos    (RAW component curve)
+    Returns: float (mean over batch)
     """
-    global TARGET_LATENT, TARGET_NORM, TARGET_DITHERED
-    global CACHED_NEGLOG_MSE_PREV, CACHED_NEGLOG_L2_PREV, LAST_EPISODE_FOR_CACHE
+    global CACHED_S_PREV, LAST_EPISODE_FOR_CACHE
 
-    # Keep original tensors for CLIP path (expects BHWC)
-    curr_img_bhwc   = current_canvas
-    target_img_bhwc = target_canvas
+    # Ensure float32 in [0,255]
+    curr_bhwc = current_canvas.float()
+    targ_bhwc = target_canvas.float()
 
     with torch.no_grad():
-        # Reset IR caches at new episode or at step 0
+        # Reset caches at new episode or at step 0
         if (LAST_EPISODE_FOR_CACHE != int(current_episode)) or (int(current_step) == 0):
-            CACHED_NEGLOG_MSE_PREV = None
-            CACHED_NEGLOG_L2_PREV  = None
+            CACHED_S_PREV = None
             LAST_EPISODE_FOR_CACHE = int(current_episode)
 
-        # ---------- Image path (MSE) ----------
-        # (B,H,W,C) -> (B,C,H,W), normalize to [0,1]
-        curr_nchw = current_canvas.permute(0, 3, 1, 2).contiguous() / 255.0
-        if TARGET_NORM is None:
-            TARGET_NORM = target_canvas.permute(0, 3, 1, 2).contiguous() / 255.0
+        # --- Combined similarity + components ---
+        S_curr, ssim_gr, lpips_gr, clip_gr = _combined_similarity_and_components(curr_bhwc, targ_bhwc, device)  # (B,)*4
 
-        # Dither toggle (affects only image-MSE computation)
-        if USE_DITHERING:
-            from .dithering import ordered_dither
-            if TARGET_DITHERED is None:
-                TARGET_DITHERED = ordered_dither(TARGET_NORM, cell=8)
-            img_curr_for_mse = ordered_dither(curr_nchw, cell=8)
-            img_targ_for_mse = TARGET_DITHERED
+        # --- IR (progress) and GR (current) ---
+        if CACHED_S_PREV is None:
+            IR = torch.zeros_like(S_curr)
         else:
-            img_curr_for_mse = curr_nchw
-            img_targ_for_mse = TARGET_NORM
+            IR = S_curr - CACHED_S_PREV
+        GR = S_curr
 
-        # Per-batch MSE (lower is better)
-        mse_curr = F.mse_loss(img_curr_for_mse, img_targ_for_mse, reduction="none").flatten(1).mean(dim=1)  # (B,)
-        neglog_mse_curr = -torch.log(mse_curr)  # no eps 
-        # Intermediate reward: delta vs previous step's shaped sim
-        if CACHED_NEGLOG_MSE_PREV is None:
-            ir_mse = torch.zeros_like(neglog_mse_curr)
-        else:
-            ir_mse = neglog_mse_curr - CACHED_NEGLOG_MSE_PREV
-        gr_mse = neglog_mse_curr
+        # --- Hybrid reward ---
+        hybrid = LAMBDA_IR * IR + (1.0 - LAMBDA_IR) * GR
 
-        # ---------- Embedding path (CLIP Euclidean) ----------
-        if TARGET_LATENT is None:
-            TARGET_LATENT = get_latent_representation(target_img_bhwc, device)  # (1,D)
-        current_latent = get_latent_representation(curr_img_bhwc, device)       # (1,D)
-
-        l2_curr = torch.norm(current_latent - TARGET_LATENT, dim=1)  # (1,)
-        neglog_l2_curr = -torch.log(l2_curr)  # no eps 
-        if CACHED_NEGLOG_L2_PREV is None:
-            ir_euc = torch.zeros_like(neglog_l2_curr)
-        else:
-            ir_euc = neglog_l2_curr - CACHED_NEGLOG_L2_PREV
-        gr_euc = neglog_l2_curr
-
-        # ---------- Totals (2x2) ----------
-        totals = {
-            "IR_mse__GR_mse": ir_mse + gr_mse,
-            "IR_mse__GR_euc": ir_mse + gr_euc,
-            "IR_euc__GR_mse": ir_euc + gr_mse,
-            "IR_euc__GR_euc": ir_euc + gr_euc,
-        }
-        active_total = totals[ACTIVE_TOTAL_KEY]  # (B,)
-
-        total_reward = active_total.mean().item()
-        # penalty
+        # Optional: small penalty for repeating the same nail
         if prev_idx == current_idx:
-            total_reward -= 0.5
+            hybrid = hybrid - 0.5
 
-        # ---------- Update caches for next step ----------
-        CACHED_NEGLOG_MSE_PREV = neglog_mse_curr.detach()
-        CACHED_NEGLOG_L2_PREV  = neglog_l2_curr.detach()
+        # Update cache
+        CACHED_S_PREV = S_curr.detach()
 
-        # ---------- W&B logging (global step across episodes) ----------
+        # --- Logging (global step across episodes) ---
         STEPS_PER_EP = int(config.get("max_strokes", 5000))
         global_step = int(current_episode) * STEPS_PER_EP + int(current_step)
 
         wb_log({
-            # episode/step context
-            "reward_plots/episode": int(current_episode),
-            "reward_plots/step_in_episode": int(current_step),
+            # Totals
+            "reward_plots/IR_progress":   IR.mean().item(),
+            "reward_plots/GR_similarity": GR.mean().item(),
+            "reward_plots/total_hybrid":  hybrid.mean().item(),
 
-            # raw components
-            "reward_plots/mse_curr": mse_curr.mean().item(),
-            "reward_plots/neglog_mse_curr(gr_mse)": neglog_mse_curr.mean().item(),
-            "reward_plots/l2_curr": l2_curr.mean().item(),
-            "reward_plots/neglog_l2_curr(gr_euc)": neglog_l2_curr.mean().item(),
-
-            # intermediate rewards
-            "reward_plots/ir_mse": ir_mse.mean().item(),
-            "reward_plots/ir_euc": ir_euc.mean().item(),
-
-            # general rewards
-            "reward_plots/gr_mse": gr_mse.mean().item(),
-            "reward_plots/gr_euc": gr_euc.mean().item(),
-
-            # totals (all four for side-by-side comparison)
-            "reward_plots/total_IR_mse__GR_mse": totals["IR_mse__GR_mse"].mean().item(),
-            "reward_plots/total_IR_mse__GR_euc": totals["IR_mse__GR_euc"].mean().item(),
-            "reward_plots/total_IR_euc__GR_mse": totals["IR_euc__GR_mse"].mean().item(),
-            "reward_plots/total_IR_euc__GR_euc": totals["IR_euc__GR_euc"].mean().item(),
+            # RAW component curves you asked for
+            "reward_plots/gr_ssim":       ssim_gr.mean().item(),       # ~[0,1], ↑ better
+            "reward_plots/gr_lpips_sim":  lpips_gr.mean().item(),      # ~[0,1], ↑ better
+            "reward_plots/gr_clip_cos":   clip_gr.mean().item(),       # [-1,1], ↑ better
         }, step=global_step)
 
-    return total_reward
+    return hybrid.mean().item()
 
 
 def _lpips_model(device):

@@ -25,6 +25,7 @@ import numpy as np
 import time
 from torch.cuda.amp import autocast, GradScaler
 from torch.nn.utils import clip_grad_norm_
+import math
 
 class DDPGAgent:
     def __init__(self, actor, critic, actor_target, critic_target,
@@ -120,7 +121,7 @@ class DDPGAgent:
             target_resized = self.resize_input(target_image)
             nail_logits, stroke_params = self.actor(canvas_resized, target_resized, prev_action_onehot)  # (1, nails)) 
             
-            if self.use_gumbel_in_select:
+            """if self.use_gumbel_in_select:
                 # Sample a soft vector (hard=False), then pick the argmax index
                 a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)  # (1, nails)
                 action_idx = a_soft.argmax(dim=-1).item()
@@ -128,7 +129,9 @@ class DDPGAgent:
             else:
                 # Deterministic: softmax -> argmax
                 nail_probs = torch.softmax(nail_logits, dim=-1)                           # (1, nails)
-                action_idx = nail_probs.argmax(dim=-1).item()
+                action_idx = nail_probs.argmax(dim=-1).item()"""
+            
+            action_idx = nail_logits.argmax(dim=-1).item()    
 
         self.actor.train()
         #print ("Action idx(argmax)", action_idx)
@@ -157,20 +160,25 @@ class DDPGAgent:
 
         nails = self.config["nails"]
         # for the first episode, the first 500 steps are just exploration (p=1)
-        if episode < 1 and step < 500:
+        """if episode < 1 and step < 500:
+            action_idx = np.random.randint(0, self.config["nails"])
+        else:"""
+        p = np.random.rand()  # uniform in [0, 1]
+        #p = 0
+        # make it dynamic later (threshold=0.8 now)
+        # more exploration in initial stages, more exploitation later on
+        # dynamic exploration - decays
+        STEPS_PER_EP = int(self.config.get("max_strokes", 5000))
+        global_step = int(episode) * STEPS_PER_EP + int(step)
+        eps_start, eps_end, eps_decay_steps = 0.6, 0.05, 80_000
+        eps = eps_end + (eps_start - eps_end) * math.exp(-global_step / eps_decay_steps)
+        if p < eps:
+            # exploration: pick a random nail index 
             action_idx = np.random.randint(0, self.config["nails"])
         else:
-            p = np.random.rand()  # uniform in [0, 1]
-            #p = 0
-            # make it dynamic later (threshold=0.8 now)
-            # more exploration in initial stages, more exploitation later on
-            if p > 0.8:
-                # exploration: pick a random nail index (20%)
-                action_idx = np.random.randint(0, self.config["nails"])
-            else:
-                #exploitation: use policy network (prev_soft is already a gumbel vector)
-                one_hot_prev = F.one_hot(torch.tensor([prev_action_idx]), num_classes=nails).float().to(self.device)
-                action_idx = self.select_action(canvas, target_image, one_hot_prev)
+            #exploitation: use policy network (prev_soft is already a gumbel vector)
+            one_hot_prev = F.one_hot(torch.tensor([prev_action_idx]), num_classes=nails).float().to(self.device)
+            action_idx = self.select_action(canvas, target_image, one_hot_prev)
         return action_idx
 
     def update_actor_critic(self, target_image):
@@ -212,11 +220,34 @@ class DDPGAgent:
         self.critic_optimizer.zero_grad(set_to_none=True)
         #with torch.no_grad(), autocast(dtype=torch.float16):
         with torch.no_grad():
-            # Next action for target: use argmax ONE-HOT (matches discrete env) w/o gumbel
-            next_logits, _ = self.actor_target(next_canvas_resized, target_resized, action_onehot)  # (B, nails)
-            next_idx = next_logits.argmax(dim=-1)
-            next_onehot  = F.one_hot(next_idx, nails).float()
-            target_Q = self.critic_target(next_canvas_resized, target_resized, next_onehot)
+            tau_target = 0.5
+            next_logits, _ = self.actor_target(next_canvas_resized, target_resized, action_onehot)  # (B, A)
+            probs = torch.softmax(next_logits / tau_target, dim=-1)                                 # (B, A)
+
+            B, A = probs.shape
+            K = min(8, A)  # tune 8/16/32
+
+            # ---- choose actions ----
+            # Top-K:
+            topk_probs, topk_idx = probs.topk(K, dim=-1)                      # (B, K)
+            # Or Monte-Carlo sample:
+            # topk_idx = torch.multinomial(probs, num_samples=K, replacement=False)
+            # topk_probs = probs.gather(1, topk_idx)
+
+            # one-hots for chosen actions
+            a_chunk = F.one_hot(topk_idx, num_classes=A).float()              # (B, K, A)
+            a_chunk = a_chunk.view(B*K, A)
+
+            # repeat images K times
+            s_rep = next_canvas_resized.repeat_interleave(K, dim=0)           # (B*K, C, H, W)
+            t_rep = target_resized.repeat_interleave(K, dim=0)                # (B*K, C, H, W)
+
+            # critic target on chosen actions
+            Q_chunk = self.critic_target(s_rep, t_rep, a_chunk).view(B, K, 1) # (B, K, 1)
+
+            # expected Q over chosen actions
+            pk = topk_probs.unsqueeze(-1)                                     # (B, K, 1)
+            target_Q = (pk * Q_chunk).sum(dim=1)                              # (B, 1)
             target_Q = rewards + self.config["gamma"] * target_Q * (1 - dones)
 
         #with autocast(dtype=torch.float16):
@@ -244,7 +275,7 @@ class DDPGAgent:
         self.actor_optimizer.zero_grad(set_to_none=True)
         #with autocast(dtype=torch.float16): 
         nail_logits, _ = self.actor(canvas_resized, target_resized, prev_onehot)  # (B, nails)
-        a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)   # (B, nails)
+        a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=True)   # (B, nails)
         Q_sa = self.critic(canvas_resized, target_resized, a_soft)                # (B,1)
         actor_loss = -Q_sa.mean()
 
