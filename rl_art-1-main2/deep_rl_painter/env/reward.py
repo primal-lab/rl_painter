@@ -32,6 +32,8 @@ from .dithering import ordered_dither, _save_png01_nchw
 import wandb
 from torchvision.utils import save_image
 
+# ----------------------- Config / Globals -----------------------
+
 _IS_MAIN = int(os.environ.get("RANK", "0")) == 0
 
 def wb_log(data: dict, step: int | None = None):
@@ -39,126 +41,197 @@ def wb_log(data: dict, step: int | None = None):
     if _IS_MAIN and getattr(wandb, "run", None) is not None:
         wandb.log(data, step=step)
 
-# Globals / caches 
-CLIP_MODEL = None
-PREPROCESS = None
-TARGET_CLIP_UNIT = None   # [1, D], unit norm not required since helper normalizes
-CACHED_S_PREV     = None  # previous step cosine
-LAST_EPISODE_FOR_CACHE = -1
-# --- knob ---
-LAMBDA_IR = 0.7  # R = λ·Δcos + (1−λ)·cos
+# 10 radii for 1024×1024; first is DC-only, last ≈ 111
+RADII_10 = [1, 4, 8, 13, 17, 22, 28, 42, 63, 111]
 
-def _clip_unit_from_bhwc(bhwc_255: torch.Tensor, device) -> torch.Tensor:
+# caches / episode state
+CACHED_NEGLOG_MSE_PREV = None
+LAST_EPISODE_FOR_CACHE = -1
+
+# per-episode 2DFT targets cache (list of 10 tensors (1,1,H,W) in [0,1])
+TARGETS_2DFT = None
+LAST_EPISODE_FOR_TARGETS = -1
+
+SAVE_BASE = "/storage/axp4488/rl_painter/logs/2dft_targets"
+
+def _ensure_dir(p: str):
+    os.makedirs(p, exist_ok=True)
+
+def _to_gray_np_if_needed(img_uint8_hw_or_hwc: np.ndarray) -> np.ndarray:
     """
-    Uses your get_latent_representation() to fetch CLIP features.
-    We don't *need* to L2-normalize here because calculate_cosine_similarity does it internally.
+    If input is color (H,W,3), convert to grayscale (ITU-R BT.601).
+    If already grayscale (H,W) or (H,W,1), return grayscale HxW.
+    Output: (H,W) float32 in [0,255].
     """
-    z = get_latent_representation(bhwc_255, device)   # -> [1, D]
-    return z
+    if img_uint8_hw_or_hwc.ndim == 3:
+        H, W, C = img_uint8_hw_or_hwc.shape
+        if C == 1:
+            return img_uint8_hw_or_hwc[..., 0].astype(np.float32)
+        elif C == 3:
+            r = img_uint8_hw_or_hwc[..., 0].astype(np.float32)
+            g = img_uint8_hw_or_hwc[..., 1].astype(np.float32)
+            b = img_uint8_hw_or_hwc[..., 2].astype(np.float32)
+            gray = 0.299 * r + 0.587 * g + 0.114 * b
+            return gray.astype(np.float32)
+        else:
+            # unexpected channels; take first
+            return img_uint8_hw_or_hwc[..., 0].astype(np.float32)
+    elif img_uint8_hw_or_hwc.ndim == 2:
+        return img_uint8_hw_or_hwc.astype(np.float32)
+    else:
+        # fallback: squeeze last dim if present
+        return np.squeeze(img_uint8_hw_or_hwc).astype(np.float32)
+
+def _build_2dft_targets_from_gray(gray: np.ndarray, radii: list[int]) -> list[np.ndarray]:
+    """
+    gray: (H,W) float32 in [0,255]
+    radii: list of integer radii (center-inclusive). r=0 => DC only.
+    Returns list of (H,W) float32 images in [0,255] for each radius.
+    """
+    H, W = gray.shape
+    F = np.fft.fft2(gray)
+    F_shift = np.fft.fftshift(F)
+
+    cy, cx = H // 2, W // 2
+    Y, X = np.ogrid[:H, :W]
+    R2 = (Y - cy) ** 2 + (X - cx) ** 2
+
+    outs = []
+    for r in radii:
+        mask = (R2 <= (r * r)).astype(np.float32)
+        F_masked = F_shift * mask
+        rec = np.fft.ifft2(np.fft.ifftshift(F_masked))
+        rec = np.real(rec).astype(np.float32)
+        mn, mx = rec.min(), rec.max()
+        if mx > mn:
+            rec = (rec - mn) / (mx - mn)
+        else:
+            rec = np.zeros_like(rec, dtype=np.float32)
+        rec = (rec * 255.0).astype(np.float32)
+        outs.append(rec)
+    return outs
+
+def _save_targets_to_disk(targets_hw_float255: list[np.ndarray]):
+    """
+    Saves each (H,W) float32 [0,255] as:
+      /storage/.../2dft_targets/target{i}.png   (i=1..10)
+    """
+    _ensure_dir(SAVE_BASE)
+    for i, img in enumerate(targets_hw_float255, start=1):
+        img01 = torch.tensor(img / 255.0, dtype=torch.float32)[None, None, ...]  # (1,1,H,W)
+        out_path = os.path.join(SAVE_BASE, f"target{i}.png")
+        #_save_png01_nchw(out_path, img01.clamp(0, 1))
+        _save_png01_nchw(img01, out_path)
+
+def _prepare_episode_targets(target_canvas_bhwc_uint8: torch.Tensor):
+    """
+    Build and cache the 10 2DFT targets for this episode from the first item in the batch.
+    Returns list of 10 tensors (1,1,H,W) in [0,1], on CPU (move to device on use).
+    """
+    first_np = target_canvas_bhwc_uint8[0].detach().cpu().numpy()  # (H,W,C) uint8 or (H,W,1)
+    gray = _to_gray_np_if_needed(first_np)                         # (H,W) float32 [0,255]
+    targets = _build_2dft_targets_from_gray(gray, RADII_10)       # list of (H,W) float32 [0,255]
+    _save_targets_to_disk(targets)                                 # persist for inspection
+
+    targets_torch = []
+    for t in targets:
+        t01 = torch.tensor(t / 255.0, dtype=torch.float32)[None, None, ...]  # (1,1,H,W)
+        targets_torch.append(t01)
+    return targets_torch
+
+
+# ----------------------- Main Reward -----------------------
 
 def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
                      prev_prev_idx, prev_idx, current_idx, center,
                      edge_map=None, current_episode=None, current_step=None, segments_map=None):
     """
-    CLIP-only reward with your cosine helper:
-        cos_t = cosine_similarity(curr_latent, target_latent)
-        IR = cos_t - cos_{t-1}
-        GR = cos_t
-        R  = λ·IR + (1−λ)·GR
+    Reward uses ONLY -log(MSE).
+      IR = (-log MSE_curr) - (-log MSE_prev)
+      GR = (-log MSE_curr)
+      TOTAL = IR + GR
 
-    Extras:
-      • Gaussian blur (σ=2.5, k=9) before CLIP on both current & target (target cached once).
-      • Save blurred current at step 0 and every 100 global steps to:
-            /storage/axp4488/rl_painter/logs/blur_canvas/<global_step>.png
-      • Save blurred target once to:
-            /storage/axp4488/rl_painter/logs/blur_canvas/blur_target.png
+    Also:
+      - Builds 10 frequency-limited target images (per-episode) via 2D FFT on the (grayscale) target.
+      - Saves them to /storage/axp4488/rl_painter/logs/2dft_targets/number{i}/target{i}.png
+      - Selects 1 of the 10 targets per 500 steps (5000 steps/episode).
+
+    Assumes canvases are (B, H, W, C) uint8 in [0,255].
+    current_canvas is grayscale in practice; we take the first channel.
     """
-    global TARGET_CLIP_UNIT, CACHED_S_PREV, LAST_EPISODE_FOR_CACHE
-
-    # ---- knobs ----
-    GAUSS_KSIZE = 15
-    GAUSS_SIGMA = 5.0
-    SAVE_DIR = "/storage/axp4488/rl_painter/logs/blur_canvas"
-
-    # tensors: (B=1,H,W,C) float in [0,255]
-    curr_bhwc = current_canvas.float()
-    #print(f"[DEBUG] curr_bhwc shape: {tuple(curr_bhwc.shape)}")
-    targ_bhwc = target_canvas.float()
-
-    # compute global step for saving/logging
-    steps_per_ep = int(config.get("max_strokes", 5000))
-    global_step = int(current_episode) * steps_per_ep + int(current_step)
+    global CACHED_NEGLOG_MSE_PREV, LAST_EPISODE_FOR_CACHE
+    global TARGETS_2DFT, LAST_EPISODE_FOR_TARGETS
 
     with torch.no_grad():
-        # episode reset
+        # Reset IR cache at new episode or at step 0
         if (LAST_EPISODE_FOR_CACHE != int(current_episode)) or (int(current_step) == 0):
-            CACHED_S_PREV = None
+            CACHED_NEGLOG_MSE_PREV = None
             LAST_EPISODE_FOR_CACHE = int(current_episode)
-            # If target can change per episode, also:
-            # TARGET_CLIP_UNIT = None
 
-        # Gaussian blur op
-        blur_op = T.GaussianBlur(kernel_size=GAUSS_KSIZE, sigma=GAUSS_SIGMA)
+        # Build per-episode 2DFT targets (once per episode)
+        if (TARGETS_2DFT is None) or (LAST_EPISODE_FOR_TARGETS != int(current_episode)):
+            TARGETS_2DFT = _prepare_episode_targets(target_canvas)  # list of 10 (1,1,H,W) [0,1] on CPU
+            LAST_EPISODE_FOR_TARGETS = int(current_episode)
 
-        # ----- CURRENT: BHWC -> NCHW[0..1] -> ensure 3ch -> blur -----
-        curr_nchw_01 = (curr_bhwc.permute(0, 3, 1, 2).contiguous() / 255.0)  # (B,C,H,W)
-        #print(f"[DEBUG] curr_nchw_01 shape (pre-3ch): {tuple(curr_nchw_01.shape)}")
-        if curr_nchw_01.size(1) == 1:
-            curr_nchw_01 = curr_nchw_01.repeat(1, 3, 1, 1)  # ✅ only channels
-        blur_curr_nchw_01 = blur_op(curr_nchw_01)  # (B,3,H,W) in [0,1]
-        #print(f"[DEBUG] blur_curr_nchw_01 shape: {tuple(blur_curr_nchw_01.shape)}")
+        # ----------- Choose which of the 10 targets to use this step -----------
+        # 5000 steps/ep, 10 targets => 500-step segments
+        step_in_ep = int(current_step)
+        seg_idx = min(step_in_ep // 500, 9)  # 0..9
+        chosen_t = TARGETS_2DFT[seg_idx].to(device)  # (1,1,H,W)
 
-        # Save current blurred preview at step 0 and every 100 global steps
-        if int(current_step) == 0 or int(current_step) == 4999 or (global_step % 1000 == 0):
-            os.makedirs(SAVE_DIR, exist_ok=True)
-            save_image(blur_curr_nchw_01[0], os.path.join(SAVE_DIR, f"{global_step}.png"))
+        # ----------- Current canvas grayscale NCHW [0,1] -----------
+        # We assume grayscale always; just take first channel after BHWC->NCHW
+        curr_nchw = current_canvas.permute(0, 3, 1, 2).contiguous().to(torch.float32) / 255.0  # (B,C,H,W)
+        curr_gray = curr_nchw[:, :1, ...]  # (B,1,H,W) take first channel
 
-        # Back to BHWC [0,255] for your CLIP wrapper
-        blur_curr_bhwc_255 = (blur_curr_nchw_01 * 255.0).permute(0, 2, 3, 1).contiguous()
-        #print(f"[DEBUG] blur_curr_bhwc_255 shape: {tuple(blur_curr_bhwc_255.shape)}")
+        # Match target shape to batch
+        #B = curr_gray.shape[0]
+        #targ_gray = chosen_t.expand(B, -1, -1, -1)  # (B,1,H,W)
 
-        # ----- TARGET (cache once; same blur pipeline) -----
-        if TARGET_CLIP_UNIT is None:
-            targ_nchw_01 = (targ_bhwc.permute(0, 3, 1, 2).contiguous() / 255.0)
-            if targ_nchw_01.size(1) == 1:
-                targ_nchw_01 = targ_nchw_01.repeat(1, 3, 1, 1)  # only channels
-            blur_targ_nchw_01 = blur_op(targ_nchw_01)  # (B,3,H,W) in [0,1]
+        # ----------- MSE and shaped scores -----------
+        # Per-batch MSE (lower is better)
+        mse_curr = F.mse_loss(curr_gray, chosen_t, reduction="none").flatten(1).mean(dim=1)  # (B,)
+        # No epsilon: if mse == 0 -> +inf by design (your preference)
+        neglog_mse_curr = -torch.log(mse_curr)  # (B,)
 
-            # save target blurred once
-            os.makedirs(SAVE_DIR, exist_ok=True)
-            save_image(blur_targ_nchw_01[0], os.path.join(SAVE_DIR, "blur_target.png"))
-
-            blur_targ_bhwc_255 = (blur_targ_nchw_01 * 255.0).permute(0, 2, 3, 1).contiguous()
-            TARGET_CLIP_UNIT = _clip_unit_from_bhwc(blur_targ_bhwc_255, device)  # [1,D]
-
-        # ----- CLIP cosine reward -----
-        curr_latent = _clip_unit_from_bhwc(blur_curr_bhwc_255, device)  # [1,D]
-        cos_t = calculate_cosine_similarity(curr_latent, TARGET_CLIP_UNIT).view(-1).clamp(-1.0, 1.0)
-
-        # IR/GR and hybrid reward
-        if CACHED_S_PREV is None:
-            IR = torch.zeros_like(cos_t)
+        # IR = Δ(-log MSE) relative to previous step in episode
+        if CACHED_NEGLOG_MSE_PREV is None:
+            ir_mse = torch.zeros_like(neglog_mse_curr)
         else:
-            IR = cos_t - CACHED_S_PREV
-        GR = cos_t
-        hybrid = LAMBDA_IR * IR + (1.0 - LAMBDA_IR) * GR
+            ir_mse = neglog_mse_curr - CACHED_NEGLOG_MSE_PREV
 
-        # optional: penalize repeating same nail
-        if prev_idx == current_idx:
-            hybrid = hybrid - 0.5
+        gr_mse = neglog_mse_curr
+        total = ir_mse + gr_mse  # active total
 
-        # update cache
-        CACHED_S_PREV = cos_t.detach()
+        total_reward = total.mean().item()
 
-        # logging
+        # ----------- Update caches for next step -----------
+        CACHED_NEGLOG_MSE_PREV = neglog_mse_curr.detach()
+
+        # ----------- W&B logging -----------
+        from config import config  # local import to avoid circular import at module load
+        STEPS_PER_EP = int(config.get("max_strokes", 5000))
+        global_step = int(current_episode) * STEPS_PER_EP + step_in_ep
+
         wb_log({
-            "reward_plots/IR_progress":   IR.mean().item(),
-            "reward_plots/GR_similarity": GR.mean().item(),
-            "reward_plots/total_reward":  hybrid.mean().item(),
-            # "reward_plots/gr_clip_cos":   cos_t.mean().item(),
+            #"reward_plots/episode": int(current_episode),
+            #"reward_plots/step_in_episode": step_in_ep,
+            #"reward_plots/segment_index_0_based": seg_idx,
+            #"reward_plots/segment_radius": float(RADII_10[seg_idx]),
+
+            # raw components
+            "reward_plots/mse_curr": mse_curr.mean().item(),
+            "reward_plots/neglog_mse_curr": neglog_mse_curr.mean().item(),
+
+            # components
+            "reward_plots/ir_mse": ir_mse.mean().item(),
+            "reward_plots/gr_mse": gr_mse.mean().item(),
+
+            # total
+            "reward_plots/total_reward": total_reward,
         }, step=global_step)
 
-    return hybrid.mean().item()
+    return total_reward
 
 def _lpips_model(device):
     global LPIPS_MODEL

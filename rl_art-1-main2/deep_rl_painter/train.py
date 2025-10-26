@@ -56,7 +56,7 @@ def train(config):
     if is_main:
         wandb.init(
             project="ddpg-painter",
-            name="actor(r=clip_cosine->ir+gr),blurred",  
+            name="actor_2dft_10targets_(r=-log(mse)ir+gr)",  
             #hack_actor_fixed_rotate(r=delta(-log1p(-s+E))*100)_penalty=-0.5
             config=config
         )
