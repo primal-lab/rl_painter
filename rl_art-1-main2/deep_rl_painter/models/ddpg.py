@@ -76,7 +76,7 @@ class DDPGAgent:
         self.scaler = GradScaler()  #  (for mixed precision)
 
         # --- hack actor ---
-        self.use_script = True   # set False to go back to normal behavior
+        self.use_script = False   # set False to go back to normal behavior
         self.script_ptr = 0
         script_path = os.path.join(os.path.dirname(__file__), "index.txt")
         with open(script_path, "r") as f:

@@ -30,6 +30,7 @@ import torch.nn.functional as F
 import lpips
 from .dithering import ordered_dither, _save_png01_nchw
 import wandb
+from torchvision.utils import save_image
 
 _IS_MAIN = int(os.environ.get("RANK", "0")) == 0
 
@@ -38,153 +39,126 @@ def wb_log(data: dict, step: int | None = None):
     if _IS_MAIN and getattr(wandb, "run", None) is not None:
         wandb.log(data, step=step)
 
-# Weights / knobs
-W_SSIM, W_LPIPS, W_CLIP = 0.40, 0.40, 0.20   # combined similarity weights
-LAMBDA_IR = 0.70                              # R = λ·IR + (1-λ)·GR
-
 # Globals / caches 
 CLIP_MODEL = None
 PREPROCESS = None
-LPIPS_MODEL = None
-TARGET_SSIM_NCHW  = None   # (B,C,H,W) in [0,1]
-TARGET_LPIPS_NCHW = None   # (B,3,H,W) in [-1,1]
-TARGET_CLIP_UNIT  = None   # (1,D) unit-norm CLIP embedding of target
-
-CACHED_S_PREV     = None   # (B,) previous step's combined similarity
+TARGET_CLIP_UNIT = None   # [1, D], unit norm not required since helper normalizes
+CACHED_S_PREV     = None  # previous step cosine
 LAST_EPISODE_FOR_CACHE = -1
-
-def _get_lpips(device):
-    return _lpips_model(device)
-
-def _prep_ssim(bhwc_255: torch.Tensor) -> torch.Tensor:
-    """(B,H,W,C)[0..255] -> (B,C,H,W)[0..1] for MS-SSIM."""
-    return (bhwc_255.permute(0,3,1,2).contiguous()) / 255.0
-
-def _prep_lpips(bhwc_255: torch.Tensor) -> torch.Tensor:
-    """(B,H,W,C)[0..255] -> (B,3,H,W)[-1..1] for LPIPS."""
-    x01 = (bhwc_255 / 255.0)
-    x = x01.permute(0,3,1,2).contiguous()
-    if x.size(1) == 1:
-        x = x.repeat(1,3,1,2)
-    return x * 2.0 - 1.0
+# --- knob ---
+LAMBDA_IR = 0.7  # R = λ·Δcos + (1−λ)·cos
 
 def _clip_unit_from_bhwc(bhwc_255: torch.Tensor, device) -> torch.Tensor:
     """
-    Uses YOUR get_latent_representation() to fetch CLIP features, then L2-normalizes.
-    Your current implementation returns [1, D]; this wrapper keeps that interface.
+    Uses your get_latent_representation() to fetch CLIP features.
+    We don't *need* to L2-normalize here because calculate_cosine_similarity does it internally.
     """
-    z = get_latent_representation(bhwc_255, device)            # [1, D]
-    z = z / (z.norm(dim=-1, keepdim=True) + 1e-12)             # unit-norm
-    return z                                                   # [1, D]
+    z = get_latent_representation(bhwc_255, device)   # -> [1, D]
+    return z
 
-
-def _combined_similarity_and_components(curr_bhwc_255: torch.Tensor,
-                                        targ_bhwc_255: torch.Tensor,
-                                        device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Computes:
-      - ssim_gr    : MS-SSIM(C_t, T)          (B,), ↑ better
-      - lpips_gr   : 1 - LPIPS(C_t, T)        (B,), ↑ better
-      - clip_gr    : CLIP cosine(C_t, T)      (B,), ↑ better
-      - S_curr     : weighted combo           (B,), ↑ better
-    Returns (S_curr, ssim_gr, lpips_gr, clip_gr).
-    """
-    global TARGET_SSIM_NCHW, TARGET_LPIPS_NCHW, TARGET_CLIP_UNIT
-
-    LP = _get_lpips(device)
-
-    # --- SSIM ---
-    curr_ssim = _prep_ssim(curr_bhwc_255).to(device)                     # (B,C,H,W) [0,1]
-    if TARGET_SSIM_NCHW is None:
-        TARGET_SSIM_NCHW = _prep_ssim(targ_bhwc_255).to(device)
-    ssim_gr = ms_ssim(curr_ssim, TARGET_SSIM_NCHW, data_range=1.0, size_average=False)  # (B,)
-
-    # --- LPIPS ---
-    curr_lpips = _prep_lpips(curr_bhwc_255).to(device)
-    if TARGET_LPIPS_NCHW is None:
-        TARGET_LPIPS_NCHW = _prep_lpips(targ_bhwc_255).to(device)
-    with torch.no_grad():
-        lp = LP(curr_lpips, TARGET_LPIPS_NCHW).view(-1)  # lower = better
-    lpips_gr = 1.0 - lp.clamp(0.0, 1.0)                  # convert to ↑ better
-
-    # --- CLIP cosine ---
-    if TARGET_CLIP_UNIT is None:
-        TARGET_CLIP_UNIT = _clip_unit_from_bhwc(targ_bhwc_255, device)   # [1,D]
-    curr_clip_unit = _clip_unit_from_bhwc(curr_bhwc_255, device)         # [1,D]
-    with torch.no_grad():
-        clip_gr = (curr_clip_unit * TARGET_CLIP_UNIT).sum(dim=-1).view(-1)  # (1,) -> (B=1,)
-        clip_gr = clip_gr.clamp(-1.0, 1.0)
-
-    # --- Weighted combo ---
-    S_curr = W_SSIM*ssim_gr + W_LPIPS*lpips_gr + W_CLIP*clip_gr          # (B,)
-
-    return S_curr, ssim_gr, lpips_gr, clip_gr
-
-# Main reward
 def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
                      prev_prev_idx, prev_idx, current_idx, center,
                      edge_map=None, current_episode=None, current_step=None, segments_map=None):
     """
-    HYBRID reward with CLIP+LPIPS+MS-SSIM.
-    Logs:
-      - reward_plots/IR_progress
-      - reward_plots/GR_similarity
-      - reward_plots/total_hybrid
-      - reward_plots/gr_ssim        (RAW component curve)
-      - reward_plots/gr_lpips_sim   (RAW component curve)
-      - reward_plots/gr_clip_cos    (RAW component curve)
-    Returns: float (mean over batch)
-    """
-    global CACHED_S_PREV, LAST_EPISODE_FOR_CACHE
+    CLIP-only reward with your cosine helper:
+        cos_t = cosine_similarity(curr_latent, target_latent)
+        IR = cos_t - cos_{t-1}
+        GR = cos_t
+        R  = λ·IR + (1−λ)·GR
 
-    # Ensure float32 in [0,255]
+    Extras:
+      • Gaussian blur (σ=2.5, k=9) before CLIP on both current & target (target cached once).
+      • Save blurred current at step 0 and every 100 global steps to:
+            /storage/axp4488/rl_painter/logs/blur_canvas/<global_step>.png
+      • Save blurred target once to:
+            /storage/axp4488/rl_painter/logs/blur_canvas/blur_target.png
+    """
+    global TARGET_CLIP_UNIT, CACHED_S_PREV, LAST_EPISODE_FOR_CACHE
+
+    # ---- knobs ----
+    GAUSS_KSIZE = 15
+    GAUSS_SIGMA = 5.0
+    SAVE_DIR = "/storage/axp4488/rl_painter/logs/blur_canvas"
+
+    # tensors: (B=1,H,W,C) float in [0,255]
     curr_bhwc = current_canvas.float()
+    #print(f"[DEBUG] curr_bhwc shape: {tuple(curr_bhwc.shape)}")
     targ_bhwc = target_canvas.float()
 
+    # compute global step for saving/logging
+    steps_per_ep = int(config.get("max_strokes", 5000))
+    global_step = int(current_episode) * steps_per_ep + int(current_step)
+
     with torch.no_grad():
-        # Reset caches at new episode or at step 0
+        # episode reset
         if (LAST_EPISODE_FOR_CACHE != int(current_episode)) or (int(current_step) == 0):
             CACHED_S_PREV = None
             LAST_EPISODE_FOR_CACHE = int(current_episode)
+            # If target can change per episode, also:
+            # TARGET_CLIP_UNIT = None
 
-        # --- Combined similarity + components ---
-        S_curr, ssim_gr, lpips_gr, clip_gr = _combined_similarity_and_components(curr_bhwc, targ_bhwc, device)  # (B,)*4
+        # Gaussian blur op
+        blur_op = T.GaussianBlur(kernel_size=GAUSS_KSIZE, sigma=GAUSS_SIGMA)
 
-        # --- IR (progress) and GR (current) ---
+        # ----- CURRENT: BHWC -> NCHW[0..1] -> ensure 3ch -> blur -----
+        curr_nchw_01 = (curr_bhwc.permute(0, 3, 1, 2).contiguous() / 255.0)  # (B,C,H,W)
+        #print(f"[DEBUG] curr_nchw_01 shape (pre-3ch): {tuple(curr_nchw_01.shape)}")
+        if curr_nchw_01.size(1) == 1:
+            curr_nchw_01 = curr_nchw_01.repeat(1, 3, 1, 1)  # ✅ only channels
+        blur_curr_nchw_01 = blur_op(curr_nchw_01)  # (B,3,H,W) in [0,1]
+        #print(f"[DEBUG] blur_curr_nchw_01 shape: {tuple(blur_curr_nchw_01.shape)}")
+
+        # Save current blurred preview at step 0 and every 100 global steps
+        if int(current_step) == 0 or int(current_step) == 4999 or (global_step % 1000 == 0):
+            os.makedirs(SAVE_DIR, exist_ok=True)
+            save_image(blur_curr_nchw_01[0], os.path.join(SAVE_DIR, f"{global_step}.png"))
+
+        # Back to BHWC [0,255] for your CLIP wrapper
+        blur_curr_bhwc_255 = (blur_curr_nchw_01 * 255.0).permute(0, 2, 3, 1).contiguous()
+        #print(f"[DEBUG] blur_curr_bhwc_255 shape: {tuple(blur_curr_bhwc_255.shape)}")
+
+        # ----- TARGET (cache once; same blur pipeline) -----
+        if TARGET_CLIP_UNIT is None:
+            targ_nchw_01 = (targ_bhwc.permute(0, 3, 1, 2).contiguous() / 255.0)
+            if targ_nchw_01.size(1) == 1:
+                targ_nchw_01 = targ_nchw_01.repeat(1, 3, 1, 1)  # only channels
+            blur_targ_nchw_01 = blur_op(targ_nchw_01)  # (B,3,H,W) in [0,1]
+
+            # save target blurred once
+            os.makedirs(SAVE_DIR, exist_ok=True)
+            save_image(blur_targ_nchw_01[0], os.path.join(SAVE_DIR, "blur_target.png"))
+
+            blur_targ_bhwc_255 = (blur_targ_nchw_01 * 255.0).permute(0, 2, 3, 1).contiguous()
+            TARGET_CLIP_UNIT = _clip_unit_from_bhwc(blur_targ_bhwc_255, device)  # [1,D]
+
+        # ----- CLIP cosine reward -----
+        curr_latent = _clip_unit_from_bhwc(blur_curr_bhwc_255, device)  # [1,D]
+        cos_t = calculate_cosine_similarity(curr_latent, TARGET_CLIP_UNIT).view(-1).clamp(-1.0, 1.0)
+
+        # IR/GR and hybrid reward
         if CACHED_S_PREV is None:
-            IR = torch.zeros_like(S_curr)
+            IR = torch.zeros_like(cos_t)
         else:
-            IR = S_curr - CACHED_S_PREV
-        GR = S_curr
-
-        # --- Hybrid reward ---
+            IR = cos_t - CACHED_S_PREV
+        GR = cos_t
         hybrid = LAMBDA_IR * IR + (1.0 - LAMBDA_IR) * GR
 
-        # Optional: small penalty for repeating the same nail
+        # optional: penalize repeating same nail
         if prev_idx == current_idx:
             hybrid = hybrid - 0.5
 
-        # Update cache
-        CACHED_S_PREV = S_curr.detach()
+        # update cache
+        CACHED_S_PREV = cos_t.detach()
 
-        # --- Logging (global step across episodes) ---
-        STEPS_PER_EP = int(config.get("max_strokes", 5000))
-        global_step = int(current_episode) * STEPS_PER_EP + int(current_step)
-
+        # logging
         wb_log({
-            # Totals
             "reward_plots/IR_progress":   IR.mean().item(),
             "reward_plots/GR_similarity": GR.mean().item(),
-            "reward_plots/total_hybrid":  hybrid.mean().item(),
-
-            # RAW component curves you asked for
-            "reward_plots/gr_ssim":       ssim_gr.mean().item(),       # ~[0,1], ↑ better
-            "reward_plots/gr_lpips_sim":  lpips_gr.mean().item(),      # ~[0,1], ↑ better
-            "reward_plots/gr_clip_cos":   clip_gr.mean().item(),       # [-1,1], ↑ better
+            "reward_plots/total_reward":  hybrid.mean().item(),
+            # "reward_plots/gr_clip_cos":   cos_t.mean().item(),
         }, step=global_step)
 
     return hybrid.mean().item()
-
 
 def _lpips_model(device):
     global LPIPS_MODEL

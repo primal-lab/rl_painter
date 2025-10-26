@@ -50,13 +50,13 @@ def train(config):
 
     device = config["device"]
     LOG_EVERY_STEPS = int(config.get("log_every_steps", 200))
-    VIDEO_EVERY = int(config.get("video_every", 50))
+    VIDEO_EVERY = int(config.get("video_every", 20))
 
     # >>> DDP EDIT: wandb only on main process
     if is_main:
         wandb.init(
             project="ddpg-painter",
-            name="hack_actor(r=lpips+clip_cos+msssim)(r=ir(combo)+gr(combo))",  
+            name="actor(r=clip_cosine->ir+gr),blurred",  
             #hack_actor_fixed_rotate(r=delta(-log1p(-s+E))*100)_penalty=-0.5
             config=config
         )
