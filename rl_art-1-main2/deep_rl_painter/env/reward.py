@@ -179,6 +179,12 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
         seg_idx = min(step_in_ep // 500, 9)  # 0..9
         chosen_t = TARGETS_2DFT[seg_idx].to(device)  # (1,1,H,W)
 
+        # ---------- Stage scheduling: 3 episodes per Fourier target ----------
+        # Episode groups: (0–2)->stage0, (3–5)->stage1, ..., (27–29)->stage9
+        """ep = int(current_episode)
+        seg_idx = min(ep // 3, 9)  # 0..9, each index stays for 3 episodes
+        chosen_t = TARGETS_2DFT[seg_idx].to(device)  # (1,1,H,W)"""
+
         # ----------- Current canvas grayscale NCHW [0,1] -----------
         # We assume grayscale always; just take first channel after BHWC->NCHW
         curr_nchw = current_canvas.permute(0, 3, 1, 2).contiguous().to(torch.float32) / 255.0  # (B,C,H,W)

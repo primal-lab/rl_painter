@@ -56,7 +56,7 @@ def train(config):
     if is_main:
         wandb.init(
             project="ddpg-painter",
-            name="actor_2dft_10targets_(r=-log(mse)ir+gr)",  
+            name="actor_2dft_targets(10tar_per_ep))(actor_lr)(r=-log(mse)ir+gr)(chnages_in_train)",  
             #hack_actor_fixed_rotate(r=delta(-log1p(-s+E))*100)_penalty=-0.5
             config=config
         )
@@ -332,7 +332,7 @@ def train(config):
                 #img = 255 - img
                 episode_frames.append(img)
 
-            if ((episode + 1) == 1 or (episode + 1) % 10 == 0) and env.used_strokes == config["max_strokes"] - 1 and is_main:
+            if ((episode + 1) == 1 or (episode + 1) % 2 == 0) and env.used_strokes == config["max_strokes"] - 1 and is_main:
                 os.makedirs("/storage/axp4488/rl_painter/logs", exist_ok=True)
                 step_dir = f"/storage/axp4488/rl_painter/logs/step_outputs/episode_{episode + 1}"
                 os.makedirs(step_dir, exist_ok=True)

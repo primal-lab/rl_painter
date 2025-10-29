@@ -84,6 +84,10 @@ class DDPGAgent:
         # assume comma-separated integers; convert to 0-based once
         self.script = [int(x.strip()) - 1 for x in txt.split(",") if x.strip()]
 
+        #update actor every 2 steps
+        self.update_actor = 0
+
+
 
     # resize canvas and target to 224x224 before passing into networks
     # runs on gpu because all inputs given later are tensors
@@ -131,7 +135,8 @@ class DDPGAgent:
                 nail_probs = torch.softmax(nail_logits, dim=-1)                           # (1, nails)
                 action_idx = nail_probs.argmax(dim=-1).item()"""
             
-            action_idx = nail_logits.argmax(dim=-1).item()    
+            a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)
+            action_idx = a_soft.argmax(dim=-1).item()    
 
         self.actor.train()
         #print ("Action idx(argmax)", action_idx)
@@ -272,16 +277,27 @@ class DDPGAgent:
                 pass
 
         # ===================== Actor Update =====================
+        for p in self.critic.parameters(): 
+            p.requires_grad_(False)
+
+        # use critic in eval mode to freeze BN running stats
+        self.critic.eval()    
+
         self.actor_optimizer.zero_grad(set_to_none=True)
         #with autocast(dtype=torch.float16): 
         nail_logits, _ = self.actor(canvas_resized, target_resized, prev_onehot)  # (B, nails)
-        a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=True)   # (B, nails)
+        a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)   # (B, nails)
         Q_sa = self.critic(canvas_resized, target_resized, a_soft)                # (B,1)
         actor_loss = -Q_sa.mean()
 
         actor_loss.backward()
         clip_grad_norm_(self.actor.parameters(), self.config.get("clip_grad_norm", 1.0))   # ← comment out to disable
         self.actor_optimizer.step()
+
+        # restore critic for the next critic update
+        self.critic.train()
+        for p in self.critic.parameters():
+            p.requires_grad_(True)
 
         if self.viz_after_backward is not None:
             try:
