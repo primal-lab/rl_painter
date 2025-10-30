@@ -30,7 +30,7 @@ config = {
 
     # model parameters
     "model_name": "resnet18",                # check models/image_encoder.py for available models
-    "actor_lr": 2e-4,                        # 2 * 10^(-4)  
+    "actor_lr": 1e-4,                        # 1 * 10^(-4)  
     "critic_lr": 3e-4,
     #critic needs to learn a bit faster than the actor so the actor chases a good value surface instead of a noisy one.
     
@@ -64,7 +64,7 @@ config = {
     #"canvas_size": (224, 224),  # (height, width)
     "canvas_size": (1024, 1024),
     #"canvas_size": (512, 512),
-    "canvas_channels": 1,  # 1 for grayscale, 3 for RGB
+    "canvas_channels": 1,  # keep 3 and repeat for grayscale (1)
     "canvas_color": (255, 255, 255),  # white background
     "canvas_stroke_color": 0,  # black stroke
 
@@ -83,5 +83,10 @@ config = {
     "resume": False,
 
     "gumbel_tau": 1.0,
+
+    # config
+    "train_every": 2,   # do a full SGD update every 2 env steps
+    "actor_every": 2,    # actor every 2 train steps = every 4 env steps
+
 
 }

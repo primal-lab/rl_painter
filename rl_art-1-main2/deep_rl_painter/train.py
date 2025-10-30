@@ -42,6 +42,7 @@ def train(config):
     rank = int(config.get("local_rank", 0))
     world_size = int(config.get("world_size", 1))
     is_main = (rank == 0)
+    config["is_main"] = is_main
 
     # >>> DDP EDIT: set and record local batch size (read this in ddpg.py)
     # If you keep global batch_size=128 and use 2 GPUs, batch_size_local=64
@@ -56,8 +57,8 @@ def train(config):
     if is_main:
         wandb.init(
             project="ddpg-painter",
-            name="actor_2dft_targets(10tar_per_ep))(actor_lr)(r=-log(mse)ir+gr)(chnages_in_train)",  
-            #hack_actor_fixed_rotate(r=delta(-log1p(-s+E))*100)_penalty=-0.5
+            #name="actor_2dft_targets(10tar_per_ep))(actor_lr)(r=-log(mse)ir+gr)(actor_loss_hard=true)(added_penalty)",  
+            name="actor_(added_entropy_in_actor_loss)(reward*10)(fixed_grad_logging)(resize+norm_inddpg_before_encoders)(encoder_replace_conv1+c=1)", #fixed timing
             config=config
         )
 
@@ -82,7 +83,7 @@ def train(config):
         actor_network_input=config["nails"],  # one-hot prev point
         in_channels=config["canvas_channels"],
         out_neurons=config["nails"] + 5
-    ).to(device)
+    )
 
     critic = Critic(
         image_encoder_model=config["model_name"],
@@ -90,7 +91,7 @@ def train(config):
         actor_network_input=config["nails"],  # one-hot current point
         in_channels=config["canvas_channels"],
         out_neurons=1
-    ).to(device)
+    )
 
     actor_target = Actor(
         image_encoder_model=config["model_name"],
@@ -98,7 +99,7 @@ def train(config):
         actor_network_input=config["nails"],
         in_channels=config["canvas_channels"],
         out_neurons=config["nails"] + 5
-    ).to(device)
+    )
 
     critic_target = Critic(
         image_encoder_model=config["model_name"],
@@ -106,7 +107,13 @@ def train(config):
         actor_network_input=config["nails"],
         in_channels=config["canvas_channels"],
         out_neurons=1
-    ).to(device)
+    )
+
+    # Move to GPU + channels_last
+    actor = actor.to(device).to(memory_format=torch.channels_last)
+    critic = critic.to(device).to(memory_format=torch.channels_last)
+    actor_target = actor_target.to(device).to(memory_format=torch.channels_last)
+    critic_target = critic_target.to(device).to(memory_format=torch.channels_last)
 
     # Sync target networks
     actor_target.load_state_dict(actor.state_dict())
@@ -122,8 +129,22 @@ def train(config):
 
     # ----- Optimizers -----
     # >>> DDP NOTE: using .parameters() on the DDP-wrapped module is correct.
-    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config["actor_lr"])
-    critic_optimizer = torch.optim.Adam(critic.parameters(), lr=config["critic_lr"])
+    #actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config["actor_lr"])
+    #critic_optimizer = torch.optim.Adam(critic.parameters(), lr=config["critic_lr"])
+    """wd = config.get("weight_decay", 0.01) # recommend a small weight decay for AdamW
+    actor_optimizer  = torch.optim.AdamW(actor.parameters(), lr=config["actor_lr"], weight_decay=wd, fused=True)
+    critic_optimizer  = torch.optim.AdamW(critic.parameters(), lr=config["critic_lr"], weight_decay=wd, fused=True)"""
+    def make_adamw(params, lr, weight_decay=0.01):
+        # fused may not exist on some builds/devices; fall back gracefully
+        try:
+            # works for now
+            return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay, fused=True)
+        except TypeError:
+            return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+
+    wd = config.get("weight_decay", 0.01)
+    actor_optimizer  = make_adamw(actor.parameters(),  lr=config["actor_lr"],  weight_decay=wd)
+    critic_optimizer = make_adamw(critic.parameters(), lr=config["critic_lr"], weight_decay=wd)
 
     # Replay buffer & noise
     replay_buffer = ReplayBuffer(capacity=config["replay_buffer_capacity"], 
@@ -251,6 +272,7 @@ def train(config):
         while not done:
             current_episode = episode
 
+            agent.set_progress(episode, env.used_strokes) # for global step calculation
             t0 = time.time()
             action_idx = agent.act(canvas_tensor, target_image, current_idx, noise_scale, episode=current_episode, step=env.used_strokes)
             #action_idx, action_soft = agent.act(canvas_tensor, target_image, prev_soft, noise_scale, episode=current_episode, step=env.used_strokes)
@@ -282,9 +304,7 @@ def train(config):
                 step=env.used_strokes
             )
 
-            agent.episode = episode + 1
-            agent.step = env.used_strokes
-
+            agent.set_progress(episode, env.used_strokes) # global steps
             t4 = time.time()
             agent.train(target_image)  
             t5 = time.time()
@@ -315,6 +335,9 @@ def train(config):
                             "update_ratio/critic_mean": float(critic_upd_ratio),
                             "loss/actor": getattr(agent, "last_actor_loss", None),
                             "loss/critic": getattr(agent, "last_critic_loss", None),
+                            "policy/entropy_nats": float(getattr(agent, "last_entropy", 0.0)),
+                            "policy/tau": float(getattr(agent, "last_tau", 0.0)),
+                            "policy/alpha_entropy": float(getattr(agent, "last_alpha", 0.0)),
                             #"episode": int(episode + 1),
                             #"env_used_strokes": int(env.used_strokes),
                         },

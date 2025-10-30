@@ -209,7 +209,12 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
         gr_mse = neglog_mse_curr
         total = ir_mse + gr_mse  # active total
 
-        total_reward = total.mean().item()
+        total_reward_raw = total.mean().item()
+
+        # penalty
+        penalty = 0.05 if (prev_idx == current_idx) else 0.0 # total reward range from 0.5 to 1.2
+        total_reward_penalized = total_reward_raw - penalty 
+        total_reward_scaled = total_reward_penalized * 10
 
         # ----------- Update caches for next step -----------
         CACHED_NEGLOG_MSE_PREV = neglog_mse_curr.detach()
@@ -227,17 +232,21 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
 
             # raw components
             "reward_plots/mse_curr": mse_curr.mean().item(),
-            "reward_plots/neglog_mse_curr": neglog_mse_curr.mean().item(),
+            "reward_plots/neglog_mse_curr(gr)": neglog_mse_curr.mean().item(),
 
             # components
             "reward_plots/ir_mse": ir_mse.mean().item(),
             "reward_plots/gr_mse": gr_mse.mean().item(),
 
             # total
-            "reward_plots/total_reward": total_reward,
+            "reward_plots/total_reward(w/o penalty)": total_reward_raw,
+            "reward_plots/total_reward_penalized": total_reward_penalized,
+            "reward_plots/total_reward_scaled": total_reward_scaled,
+            "reward_plots/penalty": penalty,
+
         }, step=global_step)
 
-    return total_reward
+    return total_reward_scaled
 
 def _lpips_model(device):
     global LPIPS_MODEL

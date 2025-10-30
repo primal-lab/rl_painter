@@ -4,6 +4,7 @@ import math
 import torch
 import torch.nn.functional as F
 from torchvision.utils import make_grid
+from contextlib import contextmanager
 
 # ---------- Core stats ----------
 @torch.no_grad()
@@ -182,18 +183,29 @@ def snapshot_vector(model):
 
 # ===== Ultra-light, GPU-friendly helpers =====
 
-@torch.no_grad()
-def flat_params(model, device):
-    """
-    One flat vector of trainable float params ON GPU (no CPU copy).
-    """
+"""@torch.no_grad()
+def flat_params(model, device):   
+    #One flat vector of trainable float params ON GPU (no CPU copy).  
     vecs = []
     for p in model.parameters():
         if p.requires_grad and torch.is_floating_point(p):
             vecs.append(p.detach().view(-1))
     if not vecs:
         return torch.zeros(1, device=device)
-    return torch.cat(vecs, dim=0).to(device)
+    return torch.cat(vecs, dim=0).to(device)"""
+
+@torch.no_grad()
+def flat_params(model, device=None):
+    vecs = []
+    with torch.no_grad():
+        for p in model.parameters():
+            if p is None:
+                continue
+            # robust to channels_last / non-contiguous tensors:
+            v = p.detach().reshape(-1)        # <- replaces .view(-1)
+            vecs.append(v)
+    out = torch.cat(vecs)
+    return out.to(device) if device is not None else out
 
 @torch.no_grad()
 def grad_flow_mean(model, device):
