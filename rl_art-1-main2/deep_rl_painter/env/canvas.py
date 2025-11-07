@@ -90,7 +90,7 @@ def update_canvas_torch(canvas: torch.Tensor,
     coords = torch.tensor(points, dtype=torch.long, device=device).T  # (2, N) - convert to tensor
 
     # 90% of the pixel (color) stays the same, and 10% is replaced with the new color
-    alpha = 0.3  # 10% opacity 
+    alpha = 0.1  # 10% opacity 
 
     # chnaged to black strokes, white canvas
     # Determine per-channel stroke color -> canvas (c, h, w)

@@ -19,7 +19,7 @@ class ImageEncoder(nn.Module):
     Encodes input images using various CNN architectures.
     """
 
-    def __init__(self, model_name: str = 'resnet50', pretrained: bool = True, fine_tune: bool = True, custom_model: Optional[nn.Module] = None, in_channels: int = 3) -> None:
+    def __init__(self, model_name: str = 'resnet50', pretrained: bool = True, fine_tune: bool = True, custom_model: Optional[nn.Module] = None, in_channels: int = 3, unfreeze_last_n: int = 1) -> None:
         """
         Args:
             model_name (str): Name of the CNN architecture to use (e.g., 'resnet50', 'efficientnet_b0', 'vgg16').
@@ -39,6 +39,7 @@ class ImageEncoder(nn.Module):
         self.custom_model = custom_model
         self.cnn = None
         self.in_channels = in_channels
+        self.unfreeze_last_n = unfreeze_last_n # last 1 layer
         self._initialize_model()
 
 
@@ -60,6 +61,8 @@ class ImageEncoder(nn.Module):
             self.cnn = self._get_inception_v3()
         elif self.model_name == 'convnext_tiny':
             self.cnn = self._get_convnext_tiny()
+        elif self.model_name.startswith('mobilenet'):
+            self.cnn = self._get_mobilenet(self.model_name)    
         else:
             raise ValueError(f"Invalid model name: {self.model_name}")
 
@@ -82,12 +85,14 @@ class ImageEncoder(nn.Module):
         else:
             raise ValueError(f"Invalid ResNet model name: {model_name}")
         
-        if self.in_channels == 1:
+        """if self.in_channels == 1:
             # Modify the first convolutional layer to accept different number of input channels
-            model.conv1 = nn.Conv2d(self.in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        elif self.in_channels != 3:
+            model.conv1 = nn.Conv2d(self.in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)"""
+        if self.in_channels != 3:
             raise ValueError(f"Invalid number of input channels: {self.in_channels}. ResNet only supports 1 or 3 channels.")
         # Remove the last fully connected layer
+        # conv1..layer4 (drop avgpool, fc)
+        # removing adpative avg pool layer to match other encoders
         model = nn.Sequential(*list(model.children())[:-2]) #no flatten here
         return model
 
@@ -182,13 +187,89 @@ class ImageEncoder(nn.Module):
         model = nn.Sequential(*list(model.children())[:-1], nn.Flatten())
         return model
 
+    def _get_mobilenet(self, model_name: str) -> nn.Module:
+        """
+        Returns MobileNet (v2/v3) truncated to the feature extractor so that
+        forward() receives a feature map (B, C, H, W).
+        """
+        # Handle torchvision old/new APIs
+        def load_mnv2(pretrained: bool):
+            try:
+                # torchvision >= 0.13
+                from torchvision.models import MobileNet_V2_Weights
+                return models.mobilenet_v2(weights=MobileNet_V2_Weights.IMAGENET1K_V1 if pretrained else None)
+            except Exception:
+                return models.mobilenet_v2(pretrained=pretrained)
+
+        def load_mnv3_small(pretrained: bool):
+            try:
+                from torchvision.models import MobileNet_V3_Small_Weights
+                return models.mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.IMAGENET1K_V1 if pretrained else None)
+            except Exception:
+                return models.mobilenet_v3_small(pretrained=pretrained)
+
+        def load_mnv3_large(pretrained: bool):
+            try:
+                from torchvision.models import MobileNet_V3_Large_Weights
+                return models.mobilenet_v3_large(weights=MobileNet_V3_Large_Weights.IMAGENET1K_V1 if pretrained else None)
+            except Exception:
+                return models.mobilenet_v3_large(pretrained=pretrained)
+
+        if model_name == 'mobilenet_v2':
+            backbone = load_mnv2(self.pretrained)
+            feat = backbone.features  # (B, 1280, 7, 7) at 224
+        elif model_name == 'mobilenet_v3_small':
+            backbone = load_mnv3_small(self.pretrained)
+            feat = backbone.features  # (B, 576, ~7, ~7)
+        elif model_name == 'mobilenet_v3_large':
+            backbone = load_mnv3_large(self.pretrained)
+            feat = backbone.features  # (B, 960, ~7, ~7)
+        else:
+            raise ValueError(f"Invalid MobileNet model name: {model_name}")
+
+        if self.in_channels != 3:
+            raise ValueError(f"in_channels={self.in_channels} unsupported for MobileNet (use 1 or 3).")
+
+        return feat  # returns a Module producing (B, C, H, W)
+    
+
     def _freeze_params(self) -> None:
-        """
-        Freezes the parameters of the CNN if not fine-tuning.
-        """
+        # Freezes the parameters of the CNN if not fine-tuning.
         if not self.fine_tune:
             for param in self.cnn.parameters():
                 param.requires_grad = False
+    
+    """def _freeze_params(self) -> None:
+        # 1) freeze everything (no matter if fine_tune = F/T)
+        for p in self.cnn.parameters():
+            p.requires_grad = False
+
+        # 2) partial-unfreeze wins if specified
+        if self.model_name.startswith('resnet') and isinstance(self.cnn, nn.Sequential) and self.unfreeze_last_n > 0:
+            mods = list(self.cnn.children())
+            # indices for stages we may want to unfreeze
+            # layer1=4, layer2=5, layer3=6, layer4=7
+            # 0 conv1, 1 bn1, 2 relu, 3 maxpool,
+            # 4 layer1, 5 layer2, 6 layer3, 7 layer4   ← the “stages”
+            stage_idxs = [4, 5, 6, 7]  # layer1..layer4
+            to_unfreeze = stage_idxs[-self.unfreeze_last_n:]
+            for idx in to_unfreeze:
+                for p in mods[idx].parameters():
+                    p.requires_grad = True
+            # keep BN in frozen parts in eval mode
+            for idx in [i for i in stage_idxs if i not in to_unfreeze]:
+                for m in mods[idx].modules():
+                    if isinstance(m, nn.BatchNorm2d):
+                        m.eval()
+                        for p in m.parameters():
+                            p.requires_grad = False
+            return  # done
+
+        # 3) otherwise: full fine-tune if requested
+        if self.fine_tune:
+            for p in self.cnn.parameters():
+                p.requires_grad = True"""
+           
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -202,8 +283,12 @@ class ImageEncoder(nn.Module):
         """
         #print("(in image_encoder.py)ImageEncoder got input of shape:", x.shape)
         features = self.cnn(x) # (B, C, h, w)
+        #print(f"[ImageEncoder] Feature map before pooling: {features.shape}")
         features = F.adaptive_avg_pool2d(features, (1, 1)).flatten(1)  # -> (B, C) e.g., (B, 512) for resnet18
-    
+        #print(f"[ImageEncoder] Feature map after pooling: {features.shape}")
+        # 1×1 pooling → total collapse → no location info.
+        # 7×7 pooling → coarse grid → partial location info
+
         # Log output shape from image encoder
         """os.makedirs("logs/model", exist_ok=True)
         with open("logs/model/image_encoder.log", "a") as f:

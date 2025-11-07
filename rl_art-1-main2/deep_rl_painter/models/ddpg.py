@@ -29,6 +29,7 @@ import math
 import time
 import torch, torch.backends.cudnn as cudnn
 import torch.distributed as dist
+import wandb
 
 def _sync_min_int(val: int, device): # for shared step -> global_step
     if not dist.is_initialized():
@@ -137,16 +138,21 @@ class DDPGAgent:
     # and normalises acc to Image Net values
     def resize_input(self, x, size=(224, 224)):
         # x: (B,C,H,W) in [0,255] or [0,1]
+        # resize
         x = F.interpolate(x, size=size, mode='bilinear', align_corners=False)
+        # scale to [0,1] if appears to be [0,255]
         if x.max() > 1.5:
             x = x / 255.0
-        mean = x.new_tensor([0.449]).view(1,1,1,1)  # avg ImageNet RGB means
-        std  = x.new_tensor([0.226]).view(1,1,1,1)  # avg ImageNet RGB stds
-        # if c = 3 (in config.py)
-        #mean = x.new_tensor([0.485, 0.456, 0.406]).view(1,3,1,1)
-        #std  = x.new_tensor([0.229, 0.224, 0.225]).view(1,3,1,1)
-        #x = (x - mean) / std
-        return (x - mean) / std
+        #mean = x.new_tensor([0.449]).view(1,1,1,1)  # avg ImageNet RGB means
+        #std  = x.new_tensor([0.226]).view(1,1,1,1)  # avg ImageNet RGB stds
+        # repeat: BCHW -> repeat channel dim (canvas channel is always 1)
+        # encoder needs 3 channels
+        x = x.repeat(1, 3, 1, 1)  
+        mean = x.new_tensor([0.485, 0.456, 0.406]).view(1,3,1,1)
+        std  = x.new_tensor([0.229, 0.224, 0.225]).view(1,3,1,1)
+        # imagenet norm
+        x = (x - mean) / std
+        return x
 
     def select_action(self, canvas, target_image, prev_action_onehot):
         """
@@ -333,10 +339,17 @@ class DDPGAgent:
 
         # ===================== Actor Update =====================
         # ---- actor cadence within training steps ----
-        RUN_ACTOR_EVERY = int(self.config.get("actor_every", 1))
+        #now - actor forward+loss+backward() every training call, 
+        #but step the optimizer only every second training call (4th env step).
+
+        RUN_ACTOR_EVERY = int(self.config.get("actor_every", 2))
         # Count “train steps” using the shared step
         shared_train_idx = shared_step // max(1, TRAIN_EVERY)
-        run_actor = (shared_train_idx % RUN_ACTOR_EVERY) == 0
+        
+        # start-of-actor-cycle on the first training call in each 2-call cycle
+        is_actor_cycle_start = (shared_train_idx % RUN_ACTOR_EVERY) == 0
+        # actor_step only on the second training call in the cycle (every 4 env steps)
+        actor_step = (shared_train_idx % RUN_ACTOR_EVERY) == (RUN_ACTOR_EVERY - 1)
 
         for p in self.critic.parameters(): 
             p.requires_grad_(False)
@@ -344,44 +357,85 @@ class DDPGAgent:
         # use critic in eval mode to freeze BN running stats
         self.critic.eval()    
 
-        #run_actor = (self.global_step % 2) == 0
-        if run_actor:
-            t = time.time()
+        # zero actor grads only at the start of the 2-call accumulation window
+        if is_actor_cycle_start:
             self.actor_optimizer.zero_grad(set_to_none=True)
-            with autocast(dtype=torch.float16): 
-                nail_logits, _ = self.actor(canvas_resized, target_resized, prev_onehot)  # (B, nails)
-                
-                a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=True)   # (B, nails)
-                #Q_sa = self.critic(canvas_resized, target_resized, a_soft)                # (B,1)
-                Q_sa = self.critic(canvas_resized.detach(), target_resized.detach(), a_soft)
 
-                # ---- entropy bonus on the soft distribution BEFORE straight-through ----
-                # use same temperature as Gumbel; compute entropy in fp32 for stability
-                tau = max(float(self.gumbel_tau), 1e-6)
-                p = F.softmax((nail_logits / tau).float(), dim=-1)                        # (B, nails)
-                # Shanon entropy H(p) = - Σ_i p_i log p_i
-                entropy = -(p * (p.clamp_min(1e-8).log())).sum(dim=-1).mean()             # scalar (nats)
-                alpha = float(self.config.get("entropy_alpha", 0.02)) # tune 0.01–0.05 (if policy collapses early,increase)
-                
-                actor_loss = -Q_sa.mean() - alpha * entropy
+        t = time.time()
+        #self.actor_optimizer.zero_grad(set_to_none=True)
+        with autocast(dtype=torch.float16): 
+            nail_logits, _ = self.actor(canvas_resized, target_resized, prev_onehot)  # (B, nails)
             
-            #actor_loss.backward()
-            self.scaler.scale(actor_loss).backward()
+            a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)   # (B, nails)
+            #Q_sa = self.critic(canvas_resized, target_resized, a_soft)                # (B,1)
+            Q_sa = self.critic(canvas_resized.detach(), target_resized.detach(), a_soft)
+            
+            # 1) "pre-entropy" actor loss: just the Q term (negated mean Q)
+            q_only_loss = -Q_sa.mean()
+            
+            # 2) ---- entropy bonus on the soft distribution BEFORE straight-through ----
+            # use same temperature as Gumbel; compute entropy in fp32 for stability
+            tau = max(float(self.gumbel_tau), 1e-6)
+            p = F.softmax((nail_logits / tau).float(), dim=-1)                        # (B, nails)
+            # Shanon entropy H(p) = - Σ_i p_i log p_i
+            entropy = -(p * (p.clamp_min(1e-8).log())).sum(dim=-1).mean()             # scalar (nats)
+            
+            # 3) alpha and entropy term
+            alpha = float(self.config.get("entropy_alpha", 0.02)) # tune 0.01–0.05 (if policy collapses early,increase)
+            entropy_term = alpha * entropy
+
+            # 4) final actor loss
+            #actor_loss = -Q_sa.mean() - alpha * entropy
+            actor_loss = q_only_loss - entropy_term
+        
+        #computes gradients
+        self.scaler.scale(actor_loss).backward()
+        if actor_step:
             self.scaler.unscale_(self.actor_optimizer)
             clip_grad_norm_(self.actor.parameters(), self.config.get("clip_grad_norm", 1.0))   # ← comment out to disable
-            #self.actor_optimizer.step()
+            #updates the model weights acc to the gradients
             self.scaler.step(self.actor_optimizer)
             self.scaler.update()
+            # ready for next accumulation window
+            self.actor_optimizer.zero_grad(set_to_none=True)
 
-            # store loss + policy stats
-            self.last_actor_loss = float(actor_loss.detach())
-            self.last_entropy    = float(entropy.detach())
-            self.last_tau        = float(tau)
-            self.last_alpha      = float(alpha)
+        # store loss + policy stats (optional)
+        self.last_actor_loss = float(actor_loss.detach())
+        self.last_entropy    = float(entropy.detach())
+        self.last_tau        = float(tau)
+        self.last_alpha      = float(alpha)
 
-            if self.is_main: print(f"[time] actor_s: {time.time() - t:.6f}")
-        else:
-            if self.is_main: print(f"[time] actor_s: 0.000000 (skipped) ")    
+        # ---------- W&B logging (main rank only; once per actor step) ----------
+        if self.is_main and actor_step:
+            # env-step on x-axis (“global step” on plots)
+            step_val = int(shared_step)
+            wandb.log({
+                "actor loss/q_only":          float(q_only_loss.detach()),   # before entropy
+                "actor loss/alpha":           float(alpha),                  # alpha value
+                "actor loss/entropy":         float(entropy.detach()),       # entropy value
+                "actor loss/alpha_x_entropy": float(entropy_term.detach()),
+                "actor loss/final":           float(actor_loss.detach()),    # final actor loss
+            }, step=step_val)
+
+        if self.is_main:
+            wandb.log({
+                "dbg/shared_step": int(shared_step),
+                "dbg/shared_train_idx": int(shared_train_idx),
+                "dbg/is_actor_cycle_start": int(is_actor_cycle_start),
+                "dbg/actor_step_flag": int(actor_step),
+                "dbg/TRAIN_EVERY": int(TRAIN_EVERY),
+                "dbg/RUN_ACTOR_EVERY": int(RUN_ACTOR_EVERY),
+                "dbg/critic_training_mode": int(self.critic.training),
+                "dbg/any_critic_requires_grad": int(any(p.requires_grad for p in self.critic.parameters())),
+                "dbg/scaler_scale": float(self.scaler.get_scale()),
+            }, step=int(shared_step))
+    
+
+        if self.is_main:
+            if actor_step: 
+                print(f"[time] actor_s: {time.time() - t:.6f}")
+            else:
+                print(f"[time] actor_s: 0.000000 (accumulating) ")    
 
         # restore critic for the next critic update
         self.critic.train()

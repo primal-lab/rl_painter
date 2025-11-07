@@ -58,7 +58,8 @@ def train(config):
         wandb.init(
             project="ddpg-painter",
             #name="actor_2dft_targets(10tar_per_ep))(actor_lr)(r=-log(mse)ir+gr)(actor_loss_hard=true)(added_penalty)",  
-            name="actor_(added_entropy_in_actor_loss)(reward*10)(fixed_grad_logging)(resize+norm_inddpg_before_encoders)(encoder_replace_conv1+c=1)", #fixed timing
+            name="(testing_gates)actor_(1target-ir+gr(mse))_resnet18(nolayer_frozen)_(512,1024,1024)_actorloss(hard=f)_opacity=0.1", #fixed timing
+            # (actor_loss_chnages) = forward+loss+backward every training call, but. optimizer step only 2 trainign calls
             config=config
         )
 
@@ -81,7 +82,7 @@ def train(config):
         image_encoder_model=config["model_name"],
         image_encoder_model_2=config["model_name"],
         actor_network_input=config["nails"],  # one-hot prev point
-        in_channels=config["canvas_channels"],
+        in_channels=config["encoder_in_channels"],
         out_neurons=config["nails"] + 5
     )
 
@@ -89,7 +90,7 @@ def train(config):
         image_encoder_model=config["model_name"],
         image_encoder_model_2=config["model_name"],
         actor_network_input=config["nails"],  # one-hot current point
-        in_channels=config["canvas_channels"],
+        in_channels=config["encoder_in_channels"],
         out_neurons=1
     )
 
@@ -97,7 +98,7 @@ def train(config):
         image_encoder_model=config["model_name"],
         image_encoder_model_2=config["model_name"],
         actor_network_input=config["nails"],
-        in_channels=config["canvas_channels"],
+        in_channels=config["encoder_in_channels"],
         out_neurons=config["nails"] + 5
     )
 
@@ -105,7 +106,7 @@ def train(config):
         image_encoder_model=config["model_name"],
         image_encoder_model_2=config["model_name"],
         actor_network_input=config["nails"],
-        in_channels=config["canvas_channels"],
+        in_channels=config["encoder_in_channels"],
         out_neurons=1
     )
 

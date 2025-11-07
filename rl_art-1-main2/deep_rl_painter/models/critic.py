@@ -20,7 +20,7 @@ class Critic(nn.Module):
                  fine_tune_encoder: bool = True,
                  fine_tune_encoder_2: bool = True,
                  actor_network_input: int = 180,  # one-hot vector of the current point
-                 hidden_layers: list = [512, 256, 128, 64, 32],
+                 hidden_layers: list = [512, 1024, 1024],
                  use_custom_encoder: bool = False,
                  use_custom_encoder_2: bool = False,
                  custom_encoder: nn.Module = None,

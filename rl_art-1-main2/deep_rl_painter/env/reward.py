@@ -41,212 +41,83 @@ def wb_log(data: dict, step: int | None = None):
     if _IS_MAIN and getattr(wandb, "run", None) is not None:
         wandb.log(data, step=step)
 
-# 10 radii for 1024×1024; first is DC-only, last ≈ 111
-RADII_10 = [1, 4, 8, 13, 17, 22, 28, 42, 63, 111]
-
-# caches / episode state
-CACHED_NEGLOG_MSE_PREV = None
+TARGET_NORM = None            # (B,C,H,W) in [0,1]
+CACHED_NEGLOG_MSE_PREV = None # (B,)
 LAST_EPISODE_FOR_CACHE = -1
-
-# per-episode 2DFT targets cache (list of 10 tensors (1,1,H,W) in [0,1])
-TARGETS_2DFT = None
-LAST_EPISODE_FOR_TARGETS = -1
-
-SAVE_BASE = "/storage/axp4488/rl_painter/logs/2dft_targets"
-
-def _ensure_dir(p: str):
-    os.makedirs(p, exist_ok=True)
-
-def _to_gray_np_if_needed(img_uint8_hw_or_hwc: np.ndarray) -> np.ndarray:
-    """
-    If input is color (H,W,3), convert to grayscale (ITU-R BT.601).
-    If already grayscale (H,W) or (H,W,1), return grayscale HxW.
-    Output: (H,W) float32 in [0,255].
-    """
-    if img_uint8_hw_or_hwc.ndim == 3:
-        H, W, C = img_uint8_hw_or_hwc.shape
-        if C == 1:
-            return img_uint8_hw_or_hwc[..., 0].astype(np.float32)
-        elif C == 3:
-            r = img_uint8_hw_or_hwc[..., 0].astype(np.float32)
-            g = img_uint8_hw_or_hwc[..., 1].astype(np.float32)
-            b = img_uint8_hw_or_hwc[..., 2].astype(np.float32)
-            gray = 0.299 * r + 0.587 * g + 0.114 * b
-            return gray.astype(np.float32)
-        else:
-            # unexpected channels; take first
-            return img_uint8_hw_or_hwc[..., 0].astype(np.float32)
-    elif img_uint8_hw_or_hwc.ndim == 2:
-        return img_uint8_hw_or_hwc.astype(np.float32)
-    else:
-        # fallback: squeeze last dim if present
-        return np.squeeze(img_uint8_hw_or_hwc).astype(np.float32)
-
-def _build_2dft_targets_from_gray(gray: np.ndarray, radii: list[int]) -> list[np.ndarray]:
-    """
-    gray: (H,W) float32 in [0,255]
-    radii: list of integer radii (center-inclusive). r=0 => DC only.
-    Returns list of (H,W) float32 images in [0,255] for each radius.
-    """
-    H, W = gray.shape
-    F = np.fft.fft2(gray)
-    F_shift = np.fft.fftshift(F)
-
-    cy, cx = H // 2, W // 2
-    Y, X = np.ogrid[:H, :W]
-    R2 = (Y - cy) ** 2 + (X - cx) ** 2
-
-    outs = []
-    for r in radii:
-        mask = (R2 <= (r * r)).astype(np.float32)
-        F_masked = F_shift * mask
-        rec = np.fft.ifft2(np.fft.ifftshift(F_masked))
-        rec = np.real(rec).astype(np.float32)
-        mn, mx = rec.min(), rec.max()
-        if mx > mn:
-            rec = (rec - mn) / (mx - mn)
-        else:
-            rec = np.zeros_like(rec, dtype=np.float32)
-        rec = (rec * 255.0).astype(np.float32)
-        outs.append(rec)
-    return outs
-
-def _save_targets_to_disk(targets_hw_float255: list[np.ndarray]):
-    """
-    Saves each (H,W) float32 [0,255] as:
-      /storage/.../2dft_targets/target{i}.png   (i=1..10)
-    """
-    _ensure_dir(SAVE_BASE)
-    for i, img in enumerate(targets_hw_float255, start=1):
-        img01 = torch.tensor(img / 255.0, dtype=torch.float32)[None, None, ...]  # (1,1,H,W)
-        out_path = os.path.join(SAVE_BASE, f"target{i}.png")
-        #_save_png01_nchw(out_path, img01.clamp(0, 1))
-        _save_png01_nchw(img01, out_path)
-
-def _prepare_episode_targets(target_canvas_bhwc_uint8: torch.Tensor):
-    """
-    Build and cache the 10 2DFT targets for this episode from the first item in the batch.
-    Returns list of 10 tensors (1,1,H,W) in [0,1], on CPU (move to device on use).
-    """
-    first_np = target_canvas_bhwc_uint8[0].detach().cpu().numpy()  # (H,W,C) uint8 or (H,W,1)
-    gray = _to_gray_np_if_needed(first_np)                         # (H,W) float32 [0,255]
-    targets = _build_2dft_targets_from_gray(gray, RADII_10)       # list of (H,W) float32 [0,255]
-    _save_targets_to_disk(targets)                                 # persist for inspection
-
-    targets_torch = []
-    for t in targets:
-        t01 = torch.tensor(t / 255.0, dtype=torch.float32)[None, None, ...]  # (1,1,H,W)
-        targets_torch.append(t01)
-    return targets_torch
-
-
-# ----------------------- Main Reward -----------------------
 
 def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
                      prev_prev_idx, prev_idx, current_idx, center,
                      edge_map=None, current_episode=None, current_step=None, segments_map=None):
     """
-    Reward uses ONLY -log(MSE).
-      IR = (-log MSE_curr) - (-log MSE_prev)
-      GR = (-log MSE_curr)
-      TOTAL = IR + GR
+    MSE-only reward (no dithering):
+      IR_mse = Δ( -log(MSE) ) vs previous step
+      GR_mse = -log(MSE)
+      total_raw = mean(IR_mse + GR_mse)
+      total_penalized = total_raw - penalty
+      total_scaled = total_penalized * reward_scale
 
-    Also:
-      - Builds 10 frequency-limited target images (per-episode) via 2D FFT on the (grayscale) target.
-      - Saves them to /storage/axp4488/rl_painter/logs/2dft_targets/number{i}/target{i}.png
-      - Selects 1 of the 10 targets per 500 steps (5000 steps/episode).
-
-    Assumes canvases are (B, H, W, C) uint8 in [0,255].
-    current_canvas is grayscale in practice; we take the first channel.
+    Logs (reward_plots/*): raw MSE, -log MSE, IR, GR, totals (w/o penalty, penalized, scaled), penalty.
+    Assumes canvases are (B,H,W,C) in [0,255]. No eps added to logs.
     """
+    reward_scale       = float(config.get("reward_scale", 10))
+    same_nail_penalty  = float(config.get("same_nail_penalty", 0.05))
+    steps_per_ep       = int(config.get("max_strokes", 5000))
+
+    global TARGET_NORM
     global CACHED_NEGLOG_MSE_PREV, LAST_EPISODE_FOR_CACHE
-    global TARGETS_2DFT, LAST_EPISODE_FOR_TARGETS
 
     with torch.no_grad():
-        # Reset IR cache at new episode or at step 0
-        if (LAST_EPISODE_FOR_CACHE != int(current_episode)) or (int(current_step) == 0):
+        ep = int(current_episode)
+        st = int(current_step)
+        if (LAST_EPISODE_FOR_CACHE != ep) or (st == 0):
             CACHED_NEGLOG_MSE_PREV = None
-            LAST_EPISODE_FOR_CACHE = int(current_episode)
+            LAST_EPISODE_FOR_CACHE = ep
 
-        # Build per-episode 2DFT targets (once per episode)
-        if (TARGETS_2DFT is None) or (LAST_EPISODE_FOR_TARGETS != int(current_episode)):
-            TARGETS_2DFT = _prepare_episode_targets(target_canvas)  # list of 10 (1,1,H,W) [0,1] on CPU
-            LAST_EPISODE_FOR_TARGETS = int(current_episode)
+        # ---- NCHW in [0,1] ----
+        curr_nchw = current_canvas.permute(0, 3, 1, 2).contiguous() / 255.0
+        if TARGET_NORM is None:
+            TARGET_NORM = target_canvas.permute(0, 3, 1, 2).contiguous() / 255.0
 
-        # ----------- Choose which of the 10 targets to use this step -----------
-        # 5000 steps/ep, 10 targets => 500-step segments
-        step_in_ep = int(current_step)
-        seg_idx = min(step_in_ep // 500, 9)  # 0..9
-        chosen_t = TARGETS_2DFT[seg_idx].to(device)  # (1,1,H,W)
+        # ---- raw MSE per sample ----
+        mse_curr = F.mse_loss(curr_nchw, TARGET_NORM, reduction="none").flatten(1).mean(dim=1)  # (B,)
+        neglog_mse_curr = -torch.log(mse_curr)  # no eps
 
-        # ---------- Stage scheduling: 3 episodes per Fourier target ----------
-        # Episode groups: (0–2)->stage0, (3–5)->stage1, ..., (27–29)->stage9
-        """ep = int(current_episode)
-        seg_idx = min(ep // 3, 9)  # 0..9, each index stays for 3 episodes
-        chosen_t = TARGETS_2DFT[seg_idx].to(device)  # (1,1,H,W)"""
-
-        # ----------- Current canvas grayscale NCHW [0,1] -----------
-        # We assume grayscale always; just take first channel after BHWC->NCHW
-        curr_nchw = current_canvas.permute(0, 3, 1, 2).contiguous().to(torch.float32) / 255.0  # (B,C,H,W)
-        curr_gray = curr_nchw[:, :1, ...]  # (B,1,H,W) take first channel
-
-        # Match target shape to batch
-        #B = curr_gray.shape[0]
-        #targ_gray = chosen_t.expand(B, -1, -1, -1)  # (B,1,H,W)
-
-        # ----------- MSE and shaped scores -----------
-        # Per-batch MSE (lower is better)
-        mse_curr = F.mse_loss(curr_gray, chosen_t, reduction="none").flatten(1).mean(dim=1)  # (B,)
-        # No epsilon: if mse == 0 -> +inf by design (your preference)
-        neglog_mse_curr = -torch.log(mse_curr)  # (B,)
-
-        # IR = Δ(-log MSE) relative to previous step in episode
+        # ---- IR & GR ----
         if CACHED_NEGLOG_MSE_PREV is None:
             ir_mse = torch.zeros_like(neglog_mse_curr)
         else:
             ir_mse = neglog_mse_curr - CACHED_NEGLOG_MSE_PREV
-
         gr_mse = neglog_mse_curr
-        total = ir_mse + gr_mse  # active total
 
-        total_reward_raw = total.mean().item()
+        # ---- totals ----
+        total_raw = (ir_mse + gr_mse).mean().item()
+        penalty = same_nail_penalty if (prev_idx == current_idx) else 0.0
+        total_penalized = total_raw - penalty
+        total_scaled = total_penalized * reward_scale
 
-        # penalty
-        penalty = 0.05 if (prev_idx == current_idx) else 0.0 # total reward range from 0.5 to 1.2
-        total_reward_penalized = total_reward_raw - penalty 
-        total_reward_scaled = total_reward_penalized * 10
-
-        # ----------- Update caches for next step -----------
+        # ---- update caches ----
         CACHED_NEGLOG_MSE_PREV = neglog_mse_curr.detach()
 
-        # ----------- W&B logging -----------
-        from config import config  # local import to avoid circular import at module load
-        STEPS_PER_EP = int(config.get("max_strokes", 5000))
-        global_step = int(current_episode) * STEPS_PER_EP + step_in_ep
-
+        # ---- logging ----
+        global_step = ep * steps_per_ep + st
         wb_log({
-            #"reward_plots/episode": int(current_episode),
-            #"reward_plots/step_in_episode": step_in_ep,
-            #"reward_plots/segment_index_0_based": seg_idx,
-            #"reward_plots/segment_radius": float(RADII_10[seg_idx]),
+            "reward_plots/episode": ep,
+            "reward_plots/step_in_episode": st,
 
-            # raw components
             "reward_plots/mse_curr": mse_curr.mean().item(),
-            "reward_plots/neglog_mse_curr(gr)": neglog_mse_curr.mean().item(),
+            "reward_plots/neglog_mse_curr": neglog_mse_curr.mean().item(),
 
-            # components
             "reward_plots/ir_mse": ir_mse.mean().item(),
             "reward_plots/gr_mse": gr_mse.mean().item(),
 
-            # total
-            "reward_plots/total_reward(w/o penalty)": total_reward_raw,
-            "reward_plots/total_reward_penalized": total_reward_penalized,
-            "reward_plots/total_reward_scaled": total_reward_scaled,
+            "reward_plots/total_reward(w/o penalty)": total_raw,
+            "reward_plots/total_reward_penalized": total_penalized,
+            "reward_plots/total_reward_scaled": total_scaled,
             "reward_plots/penalty": penalty,
-
         }, step=global_step)
 
-    return total_reward_scaled
+    return total_scaled
+
 
 def _lpips_model(device):
     global LPIPS_MODEL

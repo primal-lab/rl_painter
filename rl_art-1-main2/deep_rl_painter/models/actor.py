@@ -17,16 +17,16 @@ class Actor(nn.Module):
                  image_encoder_model: str = 'resnet50',
                  image_encoder_model_2: Optional[str] = 'resnet50',
                  pretrained: bool = True,
-                 fine_tune_encoder: Optional[bool] = True,
+                 fine_tune_encoder: Optional[bool] = True, #false = freeze params
                  fine_tune_encoder_2: Optional[bool] = True,
                  actor_network_input: int = 180,  # one-hot vector of the prev point
-                 hidden_layers: list = [512, 256, 128, 64, 32],
+                 hidden_layers: list = [512, 1024, 1024],
                  use_custom_encoder: Optional[bool] = False,
                  use_custom_encoder_2: Optional[bool] = False,
                  custom_encoder: nn.Module = None,
                  custom_encoder_2: nn.Module = None,
                  activation_function: str = 'LeakyReLU',
-                 in_channels: int = 1, # 3 for rgb
+                 in_channels: int = 3, # 3 for rgb
                  out_neurons: int = 185, # number of nails + r,g,b,w,o
                  ) -> None:
         """
