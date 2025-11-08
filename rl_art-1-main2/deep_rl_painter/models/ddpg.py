@@ -191,8 +191,9 @@ class DDPGAgent:
                 nail_probs = torch.softmax(nail_logits, dim=-1)                           # (1, nails)
                 action_idx = nail_probs.argmax(dim=-1).item()"""
             
-            a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)
-            action_idx = a_soft.argmax(dim=-1).item()    
+            #a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)
+            #action_idx = a_soft.argmax(dim=-1).item()    
+            action_idx = nail_logits.argmax(dim=-1).item()
 
         self.actor.train()
         #print ("Action idx(argmax)", action_idx)
@@ -311,6 +312,7 @@ class DDPGAgent:
             next_logits, _ = self.actor_target(next_canvas_resized, target_resized, action_onehot)  # (B, nails)
             next_idx = next_logits.argmax(dim=-1)
             next_onehot  = F.one_hot(next_idx, nails).float()
+            #next_onehot = F.gumbel_softmax(next_logits, tau=self.gumbel_tau, hard=False)             # (B, nails), straight-through
             target_Q = self.critic_target(next_canvas_resized, target_resized, next_onehot)
             target_Q = rewards + self.config["gamma"] * target_Q * (1 - dones)
         if self.is_main: print(f"[time] targetQ_s: {time.time() - t:.6f}")
@@ -327,6 +329,12 @@ class DDPGAgent:
             critic_loss = F.mse_loss(current_Q, target_Q)
         #critic_loss.backward()
         self.scaler.scale(critic_loss).backward()
+        # --- gradient viz before grads are cleared ---
+        if self.is_main and (shared_step % 50 == 0) and (self.viz_after_backward is not None):
+            try:
+                self.viz_after_backward()
+            except Exception as e:
+                print(f"[viz critic error]: {e}")
         self.scaler.unscale_(self.critic_optimizer)
         clip_grad_norm_(self.critic.parameters(), self.config.get("clip_grad_norm", 1.0))  # ← comment out to disable
         #self.critic_optimizer.step()
@@ -363,33 +371,56 @@ class DDPGAgent:
 
         t = time.time()
         #self.actor_optimizer.zero_grad(set_to_none=True)
-        with autocast(dtype=torch.float16): 
-            nail_logits, _ = self.actor(canvas_resized, target_resized, prev_onehot)  # (B, nails)
-            
+        """with autocast(dtype=torch.float16): 
+            nail_logits, _ = self.actor(canvas_resized, target_resized, prev_onehot)  # (B, nails)          
             a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)   # (B, nails)
             #Q_sa = self.critic(canvas_resized, target_resized, a_soft)                # (B,1)
-            Q_sa = self.critic(canvas_resized.detach(), target_resized.detach(), a_soft)
-            
+            Q_sa = self.critic(canvas_resized.detach(), target_resized.detach(), a_soft)           
             # 1) "pre-entropy" actor loss: just the Q term (negated mean Q)
             q_only_loss = -Q_sa.mean()
-            
             # 2) ---- entropy bonus on the soft distribution BEFORE straight-through ----
             # use same temperature as Gumbel; compute entropy in fp32 for stability
             tau = max(float(self.gumbel_tau), 1e-6)
             p = F.softmax((nail_logits / tau).float(), dim=-1)                        # (B, nails)
             # Shanon entropy H(p) = - Σ_i p_i log p_i
-            entropy = -(p * (p.clamp_min(1e-8).log())).sum(dim=-1).mean()             # scalar (nats)
-            
+            entropy = -(p * (p.clamp_min(1e-8).log())).sum(dim=-1).mean()             # scalar (nats)           
             # 3) alpha and entropy term
-            alpha = float(self.config.get("entropy_alpha", 0.02)) # tune 0.01–0.05 (if policy collapses early,increase)
+            alpha = float(self.config.get("entropy_alpha", 0.05)) # tune 0.01–0.05 (if policy collapses early,increase)
             entropy_term = alpha * entropy
-
             # 4) final actor loss
             #actor_loss = -Q_sa.mean() - alpha * entropy
-            actor_loss = q_only_loss - entropy_term
+            actor_loss = q_only_loss - entropy_term"""
+
+        with autocast(dtype=torch.float16):
+            nail_logits, _ = self.actor(canvas_resized, target_resized, prev_onehot)
+
+            tau_loss = 1.3  # warmer ONLY for loss path
+            a_soft   = F.gumbel_softmax(nail_logits, tau=tau_loss, hard=False)
+
+            Q_sa = self.critic(canvas_resized.detach(), target_resized.detach(), a_soft)
+
+            # --- Q normalization so entropy can compete ---
+            # normalising, centering the q value/ actor loss so make sure alpha has an affect
+            q_mean = Q_sa.detach().mean()
+            q_std  = Q_sa.detach().std().clamp_min(1e-3)
+            Q_norm = (Q_sa - q_mean) / q_std
+
+            # --- Entropy from logits/τ (numerically stable) ---
+            # same p*log(p) but more stable
+            ent = torch.distributions.Categorical(logits=(nail_logits / tau_loss)).entropy().mean()
+
+            alpha = float(self.config.get("entropy_alpha", 0.10))
+            actor_loss = -(Q_norm.mean() + alpha * ent)
+        
         
         #computes gradients
         self.scaler.scale(actor_loss).backward()
+        # --- gradient viz before grads are cleared ---
+        if self.is_main and (shared_step % 50 == 0) and (self.viz_after_backward is not None):
+            try:
+                self.viz_after_backward()
+            except Exception as e:
+                print(f"[viz actor error]: {e}")
         if actor_step:
             self.scaler.unscale_(self.actor_optimizer)
             clip_grad_norm_(self.actor.parameters(), self.config.get("clip_grad_norm", 1.0))   # ← comment out to disable
@@ -401,12 +432,12 @@ class DDPGAgent:
 
         # store loss + policy stats (optional)
         self.last_actor_loss = float(actor_loss.detach())
-        self.last_entropy    = float(entropy.detach())
-        self.last_tau        = float(tau)
-        self.last_alpha      = float(alpha)
+        #self.last_entropy    = float(entropy.detach())
+        #self.last_tau        = float(tau)
+        #self.last_alpha      = float(alpha)
 
         # ---------- W&B logging (main rank only; once per actor step) ----------
-        if self.is_main and actor_step:
+        """if self.is_main and actor_step:
             # env-step on x-axis (“global step” on plots)
             step_val = int(shared_step)
             wandb.log({
@@ -415,7 +446,27 @@ class DDPGAgent:
                 "actor loss/entropy":         float(entropy.detach()),       # entropy value
                 "actor loss/alpha_x_entropy": float(entropy_term.detach()),
                 "actor loss/final":           float(actor_loss.detach()),    # final actor loss
+            }, step=step_val)"""
+
+        if self.is_main and actor_step:
+            step_val = int(shared_step)
+            wandb.log({
+                # Actor loss terms
+                "actor loss/q_norm_mean":     float(Q_norm.mean().detach()),
+                "actor loss/q_mean_raw":      float(q_mean),
+                "actor loss/q_std_raw":       float(q_std),
+                "actor loss/alpha":           float(alpha),
+                "actor loss/entropy":         float(ent.detach()),
+                "actor loss/alpha_x_entropy": float(alpha * ent.detach().mean()),
+                "actor loss/final":           float(actor_loss.detach()),
+
+                # Policy health (no extra compute: derived from a_soft)
+                "policy/top1_prob":           float(a_soft.max(dim=-1).values.mean().detach()),
+                #"policy/tau_loss":            float(tau_loss),
             }, step=step_val)
+
+
+    
 
         if self.is_main:
             wandb.log({
@@ -450,13 +501,13 @@ class DDPGAgent:
         if self.is_main: print(f"[time] soft_s: {time.time() - t:.6f}")
 
         # ===================== Hooks / viz =====================
-        t = time.time()
+        """t = time.time()
         if (self.viz_after_backward is not None) and (shared_step % 50 == 0):
             try:
                 self.viz_after_backward()
             except Exception:
                 pass
-        if self.is_main: print(f"[time] hooks_s: {time.time() - t:.6f}")
+        if self.is_main: print(f"[time] hooks_s: {time.time() - t:.6f}")"""
         
         if self.is_main:
             print(f"[time] train_total_s: {time.time() - t_total:.6f}")           

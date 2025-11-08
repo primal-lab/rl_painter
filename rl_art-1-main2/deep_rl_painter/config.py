@@ -30,7 +30,7 @@ config = {
 
     # model parameters
     "model_name": "resnet18", #"resnet18",                # check models/image_encoder.py for available models
-    "actor_lr": 1e-4,                        # 1 * 10^(-4)  
+    "actor_lr": 5e-4,                        # 1 * 10^(-4)  
     "critic_lr": 3e-4,
     #critic needs to learn a bit faster than the actor so the actor chases a good value surface instead of a noisy one.
     

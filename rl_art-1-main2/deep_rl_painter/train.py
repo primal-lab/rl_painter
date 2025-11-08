@@ -57,9 +57,8 @@ def train(config):
     if is_main:
         wandb.init(
             project="ddpg-painter",
-            #name="actor_2dft_targets(10tar_per_ep))(actor_lr)(r=-log(mse)ir+gr)(actor_loss_hard=true)(added_penalty)",  
-            name="(testing_gates)actor_(1target-ir+gr(mse))_resnet18(nolayer_frozen)_(512,1024,1024)_actorloss(hard=f)_opacity=0.1", #fixed timing
-            # (actor_loss_chnages) = forward+loss+backward every training call, but. optimizer step only 2 trainign calls
+            #name="(testing_gates)actor_(1target-ir+gr(mse))_resnet18(nolayer_frozen)_(512,1024,1024)_actorloss(hard=f)_opacity=0.1", 
+            name="run9(notes)", 
             config=config
         )
 
@@ -135,7 +134,7 @@ def train(config):
     """wd = config.get("weight_decay", 0.01) # recommend a small weight decay for AdamW
     actor_optimizer  = torch.optim.AdamW(actor.parameters(), lr=config["actor_lr"], weight_decay=wd, fused=True)
     critic_optimizer  = torch.optim.AdamW(critic.parameters(), lr=config["critic_lr"], weight_decay=wd, fused=True)"""
-    def make_adamw(params, lr, weight_decay=0.01):
+    """def make_adamw(params, lr, weight_decay=0.01):
         # fused may not exist on some builds/devices; fall back gracefully
         try:
             # works for now
@@ -145,7 +144,30 @@ def train(config):
 
     wd = config.get("weight_decay", 0.01)
     actor_optimizer  = make_adamw(actor.parameters(),  lr=config["actor_lr"],  weight_decay=wd)
-    critic_optimizer = make_adamw(critic.parameters(), lr=config["critic_lr"], weight_decay=wd)
+    critic_optimizer = make_adamw(critic.parameters(), lr=config["critic_lr"], weight_decay=wd)"""
+
+    def split_decay_params(model):
+        decay, no_decay = [], []
+        for n, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if p.ndim <= 1 or 'bias' in n or 'bn' in n or 'norm' in n:
+                no_decay.append(p)     # biases & (Batch/Layer)Norm -> no decay
+            else:
+                decay.append(p)
+        return [{'params': decay, 'weight_decay': 1e-5},
+                {'params': no_decay, 'weight_decay': 0.0}]
+
+    # Actor: NO weight decay
+    actor_optimizer = torch.optim.AdamW(
+        actor.parameters(), lr=config["actor_lr"], weight_decay=0.0
+    )
+
+    # Critic: small weight decay, exclude biases/norms
+    critic_optimizer = torch.optim.AdamW(
+        split_decay_params(critic), lr=config["critic_lr"]
+    )
+
 
     # Replay buffer & noise
     replay_buffer = ReplayBuffer(capacity=config["replay_buffer_capacity"], 
@@ -336,9 +358,9 @@ def train(config):
                             "update_ratio/critic_mean": float(critic_upd_ratio),
                             "loss/actor": getattr(agent, "last_actor_loss", None),
                             "loss/critic": getattr(agent, "last_critic_loss", None),
-                            "policy/entropy_nats": float(getattr(agent, "last_entropy", 0.0)),
-                            "policy/tau": float(getattr(agent, "last_tau", 0.0)),
-                            "policy/alpha_entropy": float(getattr(agent, "last_alpha", 0.0)),
+                            #"policy/entropy_nats": float(getattr(agent, "last_entropy", 0.0)),
+                            #"policy/tau": float(getattr(agent, "last_tau", 0.0)),
+                            #"policy/alpha_entropy": float(getattr(agent, "last_alpha", 0.0)),
                             #"episode": int(episode + 1),
                             #"env_used_strokes": int(env.used_strokes),
                         },
