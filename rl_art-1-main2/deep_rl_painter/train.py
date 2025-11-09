@@ -58,7 +58,7 @@ def train(config):
         wandb.init(
             project="ddpg-painter",
             #name="(testing_gates)actor_(1target-ir+gr(mse))_resnet18(nolayer_frozen)_(512,1024,1024)_actorloss(hard=f)_opacity=0.1", 
-            name="run9(notes)", 
+            name="run11", 
             config=config
         )
 
@@ -80,7 +80,7 @@ def train(config):
     actor = Actor(
         image_encoder_model=config["model_name"],
         image_encoder_model_2=config["model_name"],
-        actor_network_input=config["nails"],  # one-hot prev point
+        actor_network_input=config["nails"] + 2,  # one-hot prev point + (x,y)
         in_channels=config["encoder_in_channels"],
         out_neurons=config["nails"] + 5
     )
@@ -88,7 +88,7 @@ def train(config):
     critic = Critic(
         image_encoder_model=config["model_name"],
         image_encoder_model_2=config["model_name"],
-        actor_network_input=config["nails"],  # one-hot current point
+        actor_network_input=config["nails"] + 2,  # one-hot current point
         in_channels=config["encoder_in_channels"],
         out_neurons=1
     )
@@ -96,7 +96,7 @@ def train(config):
     actor_target = Actor(
         image_encoder_model=config["model_name"],
         image_encoder_model_2=config["model_name"],
-        actor_network_input=config["nails"],
+        actor_network_input=config["nails"] + 2,
         in_channels=config["encoder_in_channels"],
         out_neurons=config["nails"] + 5
     )
@@ -104,7 +104,7 @@ def train(config):
     critic_target = Critic(
         image_encoder_model=config["model_name"],
         image_encoder_model_2=config["model_name"],
-        actor_network_input=config["nails"],
+        actor_network_input=config["nails"] + 2,
         in_channels=config["encoder_in_channels"],
         out_neurons=1
     )

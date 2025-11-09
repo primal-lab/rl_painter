@@ -30,6 +30,7 @@ import time
 import torch, torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import wandb
+import math
 
 def _sync_min_int(val: int, device): # for shared step -> global_step
     if not dist.is_initialized():
@@ -127,6 +128,17 @@ class DDPGAgent:
         self.last_tau        = None
         self.last_alpha      = None
 
+        N = int(self.config["nails"])
+        angles = torch.arange(N, device=self.device, dtype=torch.float32) * (2.0 * math.pi / N)
+        self.nail_coords = torch.stack((torch.cos(angles), torch.sin(angles)), dim=1)  # (N, 2)  # (N,2)
+        self.nail_coords.requires_grad_(False) 
+
+        # Running stats for global Q normalization
+        self.q_running_mean = 0.0
+        self.q_running_std  = 1.0
+        self.q_rm_beta      = 0.99    # EMA decay (0.98–0.995 are fine)
+
+
     def set_progress(self, episode: int, step_in_ep: int):
         self.episode = int(episode)
         self.step_in_ep = int(step_in_ep)
@@ -177,22 +189,14 @@ class DDPGAgent:
 
         self.actor.eval()
         with torch.no_grad(), autocast(dtype=torch.float16):
-            canvas_resized = self.resize_input(canvas)  # (1, C, 224, 224)
+            canvas_resized = self.resize_input(canvas)   # (1, C, 224, 224)
             target_resized = self.resize_input(target_image)
-            nail_logits, stroke_params = self.actor(canvas_resized, target_resized, prev_action_onehot)  # (1, nails)) 
-            
-            """if self.use_gumbel_in_select:
-                # Sample a soft vector (hard=False), then pick the argmax index
-                a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)  # (1, nails)
-                action_idx = a_soft.argmax(dim=-1).item()
-            # not being used, only applies gumbel as of now
-            else:
-                # Deterministic: softmax -> argmax
-                nail_probs = torch.softmax(nail_logits, dim=-1)                           # (1, nails)
-                action_idx = nail_probs.argmax(dim=-1).item()"""
-            
-            #a_soft = F.gumbel_softmax(nail_logits, tau=self.gumbel_tau, hard=False)
-            #action_idx = a_soft.argmax(dim=-1).item()    
+
+            # prev_onehot: (1, N)  → add coords (1, 2)
+            prev_xy  = prev_action_onehot @ self.nail_coords   # (1, 2)
+            prev_aug = torch.cat([prev_action_onehot, prev_xy], dim=1)  # (1, N+2)
+
+            nail_logits, stroke_params = self.actor(canvas_resized, target_resized, prev_aug)
             action_idx = nail_logits.argmax(dim=-1).item()
 
         self.actor.train()
@@ -307,13 +311,17 @@ class DDPGAgent:
         # ===================== Target Critic/ Q value =====================
         #with torch.no_grad(), autocast(dtype=torch.float16):
         t = time.time()
+        # action_onehot: (B, N) from replay buffer
+        action_xy   = action_onehot @ self.nail_coords        # (B, 2)
+        action_aug  = torch.cat([action_onehot, action_xy], dim=1)  # (B, N+2)
         with torch.no_grad():
             # Next action for target: use argmax ONE-HOT (matches discrete env) w/o gumbel
-            next_logits, _ = self.actor_target(next_canvas_resized, target_resized, action_onehot)  # (B, nails)
+            next_logits, _ = self.actor_target(next_canvas_resized, target_resized, action_aug)  # (B, nails)
             next_idx = next_logits.argmax(dim=-1)
             next_onehot  = F.one_hot(next_idx, nails).float()
-            #next_onehot = F.gumbel_softmax(next_logits, tau=self.gumbel_tau, hard=False)             # (B, nails), straight-through
-            target_Q = self.critic_target(next_canvas_resized, target_resized, next_onehot)
+            next_xy     = next_onehot @ self.nail_coords                # (B, 2)
+            next_aug    = torch.cat([next_onehot, next_xy], dim=1)      # (B, N+2)
+            target_Q = self.critic_target(next_canvas_resized, target_resized, next_aug)
             target_Q = rewards + self.config["gamma"] * target_Q * (1 - dones)
         if self.is_main: print(f"[time] targetQ_s: {time.time() - t:.6f}")
 
@@ -325,7 +333,8 @@ class DDPGAgent:
         t = time.time()
         self.critic_optimizer.zero_grad(set_to_none=True)
         with autocast(dtype=torch.float16):
-            current_Q   = self.critic(canvas_resized, target_resized, action_onehot.detach()) 
+            current_Q = self.critic(canvas_resized, target_resized, action_aug.detach())
+            #current_Q   = self.critic(canvas_resized, target_resized, action_onehot.detach()) 
             critic_loss = F.mse_loss(current_Q, target_Q)
         #critic_loss.backward()
         self.scaler.scale(critic_loss).backward()
@@ -392,24 +401,40 @@ class DDPGAgent:
             actor_loss = q_only_loss - entropy_term"""
 
         with autocast(dtype=torch.float16):
-            nail_logits, _ = self.actor(canvas_resized, target_resized, prev_onehot)
+            #nail_logits, _ = self.actor(canvas_resized, target_resized, prev_onehot)
+            # prev_onehot: (B, N)
+            prev_xy    = prev_onehot @ self.nail_coords            # (B, 2)
+            prev_aug   = torch.cat([prev_onehot, prev_xy], dim=1)  # (B, N+2)
 
-            tau_loss = 1.3  # warmer ONLY for loss path
-            a_soft   = F.gumbel_softmax(nail_logits, tau=tau_loss, hard=False)
+            # forward actor with augmented prev action
+            nail_logits, _ = self.actor(canvas_resized, target_resized, prev_aug)
 
-            Q_sa = self.critic(canvas_resized.detach(), target_resized.detach(), a_soft)
+            tau_loss = 1.5  # warmer ONLY for loss path
+            a_soft   = F.gumbel_softmax(nail_logits, tau=tau_loss, hard=False)      # (B, N)
+            action_xy_soft = a_soft @ self.nail_coords                              # (B, 2)
+            a_soft_aug     = torch.cat([a_soft, action_xy_soft], dim=1)             # (B, N+2)
 
-            # --- Q normalization so entropy can compete ---
+            # critic in actor loss path gets the augmented soft action
+            Q_sa = self.critic(canvas_resized.detach(), target_resized.detach(), a_soft_aug)
+            #Q_sa = self.critic(canvas_resized.detach(), target_resized.detach(), a_soft)
+
             # normalising, centering the q value/ actor loss so make sure alpha has an affect
-            q_mean = Q_sa.detach().mean()
-            q_std  = Q_sa.detach().std().clamp_min(1e-3)
-            Q_norm = (Q_sa - q_mean) / q_std
+            # --- Q normalization so entropy can compete (EMA over time) ---
+            q_mean = float(Q_sa.detach().mean())
+            q_std  = float(Q_sa.detach().std().clamp_min(1e-3))
+
+            beta = self.q_rm_beta
+            self.q_running_mean = beta * self.q_running_mean + (1.0 - beta) * q_mean
+            self.q_running_std  = beta * self.q_running_std  + (1.0 - beta) * q_std
+            qstd = max(self.q_running_std, 1e-3)
+
+            Q_norm = (Q_sa - self.q_running_mean) / qstd
 
             # --- Entropy from logits/τ (numerically stable) ---
             # same p*log(p) but more stable
             ent = torch.distributions.Categorical(logits=(nail_logits / tau_loss)).entropy().mean()
 
-            alpha = float(self.config.get("entropy_alpha", 0.10))
+            alpha = float(self.config.get("entropy_alpha", 0.15))
             actor_loss = -(Q_norm.mean() + alpha * ent)
         
         
@@ -459,14 +484,13 @@ class DDPGAgent:
                 "actor loss/entropy":         float(ent.detach()),
                 "actor loss/alpha_x_entropy": float(alpha * ent.detach().mean()),
                 "actor loss/final":           float(actor_loss.detach()),
+                "actor loss/q_mean_ema": self.q_running_mean,
+                "actor loss/q_std_ema":  self.q_running_std,
 
                 # Policy health (no extra compute: derived from a_soft)
                 "policy/top1_prob":           float(a_soft.max(dim=-1).values.mean().detach()),
                 #"policy/tau_loss":            float(tau_loss),
             }, step=step_val)
-
-
-    
 
         if self.is_main:
             wandb.log({
