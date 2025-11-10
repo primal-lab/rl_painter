@@ -39,7 +39,7 @@ config = {
 
     "batch_size": 128,                       # if training is unstable (reward jumps/loss spikes), =32
     "gamma": 0.99,
-    "tau": 0.005,
+    "tau": 0.02, #0.005
     "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     # 2D action space (x, y, r, g, b, w) - not anymore
     "action_dim": 1, # previous point index only

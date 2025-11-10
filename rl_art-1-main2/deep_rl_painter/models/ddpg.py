@@ -136,7 +136,7 @@ class DDPGAgent:
         # Running stats for global Q normalization
         self.q_running_mean = 0.0
         self.q_running_std  = 1.0
-        self.q_rm_beta      = 0.99    # EMA decay (0.98–0.995 are fine)
+        self.q_rm_beta      = 0.995    # EMA decay (0.98–0.995 are fine)
 
 
     def set_progress(self, episode: int, step_in_ep: int):
@@ -323,6 +323,8 @@ class DDPGAgent:
             next_aug    = torch.cat([next_onehot, next_xy], dim=1)      # (B, N+2)
             target_Q = self.critic_target(next_canvas_resized, target_resized, next_aug)
             target_Q = rewards + self.config["gamma"] * target_Q * (1 - dones)
+            target_Q = target_Q.clamp(-50.0, 50.0)  # clip targets
+
         if self.is_main: print(f"[time] targetQ_s: {time.time() - t:.6f}")
 
         # ===================== Critic Update =====================
@@ -335,7 +337,9 @@ class DDPGAgent:
         with autocast(dtype=torch.float16):
             current_Q = self.critic(canvas_resized, target_resized, action_aug.detach())
             #current_Q   = self.critic(canvas_resized, target_resized, action_onehot.detach()) 
-            critic_loss = F.mse_loss(current_Q, target_Q)
+            # acts like Q-value weight decay — keeps Qs within ±50 range instead of 300+
+            critic_loss = torch.nn.functional.smooth_l1_loss(current_Q, target_Q, beta=1.0)
+            critic_loss = critic_loss + 1e-2 * (current_Q ** 2).mean()  # was 5e-3 → 1e-2
         #critic_loss.backward()
         self.scaler.scale(critic_loss).backward()
         # --- gradient viz before grads are cleared ---
@@ -345,7 +349,7 @@ class DDPGAgent:
             except Exception as e:
                 print(f"[viz critic error]: {e}")
         self.scaler.unscale_(self.critic_optimizer)
-        clip_grad_norm_(self.critic.parameters(), self.config.get("clip_grad_norm", 1.0))  # ← comment out to disable
+        clip_grad_norm_(self.critic.parameters(), self.config.get("clip_grad_norm", 0.5))  # ← comment out to disable
         #self.critic_optimizer.step()
         self.scaler.step(self.critic_optimizer)
         self.scaler.update()
@@ -409,7 +413,7 @@ class DDPGAgent:
             # forward actor with augmented prev action
             nail_logits, _ = self.actor(canvas_resized, target_resized, prev_aug)
 
-            tau_loss = 1.5  # warmer ONLY for loss path
+            tau_loss = 2.0  # warmer ONLY for loss path
             a_soft   = F.gumbel_softmax(nail_logits, tau=tau_loss, hard=False)      # (B, N)
             action_xy_soft = a_soft @ self.nail_coords                              # (B, 2)
             a_soft_aug     = torch.cat([a_soft, action_xy_soft], dim=1)             # (B, N+2)
@@ -426,7 +430,7 @@ class DDPGAgent:
             beta = self.q_rm_beta
             self.q_running_mean = beta * self.q_running_mean + (1.0 - beta) * q_mean
             self.q_running_std  = beta * self.q_running_std  + (1.0 - beta) * q_std
-            qstd = max(self.q_running_std, 1e-3)
+            qstd = max(self.q_running_std, 1e-2)
 
             Q_norm = (Q_sa - self.q_running_mean) / qstd
 
@@ -434,10 +438,11 @@ class DDPGAgent:
             # same p*log(p) but more stable
             ent = torch.distributions.Categorical(logits=(nail_logits / tau_loss)).entropy().mean()
 
-            alpha = float(self.config.get("entropy_alpha", 0.15))
+            # alpha = float(self.config.get("entropy_alpha", 0.15))
+            # annealed alpha
+            alpha = max(0.12, 0.25 * (1.0 - shared_step / 1e5))
             actor_loss = -(Q_norm.mean() + alpha * ent)
-        
-        
+                           
         #computes gradients
         self.scaler.scale(actor_loss).backward()
         # --- gradient viz before grads are cleared ---
@@ -448,7 +453,7 @@ class DDPGAgent:
                 print(f"[viz actor error]: {e}")
         if actor_step:
             self.scaler.unscale_(self.actor_optimizer)
-            clip_grad_norm_(self.actor.parameters(), self.config.get("clip_grad_norm", 1.0))   # ← comment out to disable
+            clip_grad_norm_(self.actor.parameters(), self.config.get("clip_grad_norm", 0.5))   # ← comment out to disable
             #updates the model weights acc to the gradients
             self.scaler.step(self.actor_optimizer)
             self.scaler.update()
