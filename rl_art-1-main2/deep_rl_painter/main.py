@@ -14,6 +14,12 @@ Usage examples:
 """
 
 import os
+os.environ["TORCH_HOME"]    = os.path.expanduser("~/.cache/torch")
+os.environ["TORCH_HUB_DIR"] = os.path.expanduser("~/.cache/torch/hub")
+os.environ["DREAMSIM_CACHE"]= os.path.expanduser("~/.cache/dreamsim")
+import torch, torch.hub; torch.hub.set_dir(os.environ["TORCH_HUB_DIR"])
+
+# ---------------------------------------------------------------------
 import argparse
 import random
 import numpy as np

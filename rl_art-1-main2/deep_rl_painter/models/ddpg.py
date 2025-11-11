@@ -235,7 +235,8 @@ class DDPGAgent:
         # more exploration in initial stages, more exploitation later on
         # dynamic exploration - decays    
         global_step = int(self.global_step)  # calculated above
-        eps_start, eps_end, eps_decay_steps = 0.6, 0.05, 80_000
+        #eps_start, eps_end, eps_decay_steps = 0.6, 0.05, 80_000
+        eps_start, eps_end, eps_decay_steps = 0.7, 0.10, 150_000
         eps = eps_end + (eps_start - eps_end) * math.exp(-global_step / eps_decay_steps)
         if p < eps:
             # exploration: pick a random nail index 
@@ -440,7 +441,8 @@ class DDPGAgent:
 
             # alpha = float(self.config.get("entropy_alpha", 0.15))
             # annealed alpha
-            alpha = max(0.12, 0.25 * (1.0 - shared_step / 1e5))
+            #alpha = max(0.12, 0.25 * (1.0 - shared_step / 1e5))
+            alpha = max(0.15, 0.25 * (1.0 - shared_step / 1.2e5))
             actor_loss = -(Q_norm.mean() + alpha * ent)
                            
         #computes gradients

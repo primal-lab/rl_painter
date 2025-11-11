@@ -18,16 +18,16 @@ from env.environment import PaintingEnv
 from models.actor import Actor
 from models.critic import Critic
 from models.ddpg import DDPGAgent
-from utils.noise import OUNoise
-from utils.replay_buffer import ReplayBuffer
+from rl_utils.noise import OUNoise
+from rl_utils.replay_buffer import ReplayBuffer
 from env.canvas import save_canvas
 import time
 import csv
 import glob
 import re
 import wandb
-from utils.wandb_logging import log_canvas_video, log_step_to_table
-from utils.weights_viz import (snapshot_vector, flat_params, grad_flow_mean, update_ratio_gpu)
+from rl_utils.wandb_logging import log_canvas_video, log_step_to_table
+from rl_utils.weights_viz import (snapshot_vector, flat_params, grad_flow_mean, update_ratio_gpu)
 
 # >>> DDP EDIT: import DDP
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -58,7 +58,7 @@ def train(config):
         wandb.init(
             project="ddpg-painter",
             #name="(testing_gates)actor_(1target-ir+gr(mse))_resnet18(nolayer_frozen)_(512,1024,1024)_actorloss(hard=f)_opacity=0.1", 
-            name="run14", 
+            name="run15-reward", 
             config=config
         )
 

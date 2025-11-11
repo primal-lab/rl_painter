@@ -31,92 +31,277 @@ import lpips
 from .dithering import ordered_dither, _save_png01_nchw
 import wandb
 from torchvision.utils import save_image
+from torchvision.transforms.functional import to_pil_image
+from dreamsim import dreamsim
+from typing import Optional
 
-# ----------------------- Config / Globals -----------------------
-
+# ----------------------- W&B helper -----------------------
 _IS_MAIN = int(os.environ.get("RANK", "0")) == 0
-
-def wb_log(data: dict, step: int | None = None):
-    # log only from rank0 and only if wandb is initialized
+def wb_log(data: dict, step: Optional[int] = None):
+    import wandb
     if _IS_MAIN and getattr(wandb, "run", None) is not None:
         wandb.log(data, step=step)
 
-TARGET_NORM = None            # (B,C,H,W) in [0,1]
-CACHED_NEGLOG_MSE_PREV = None # (B,)
+# ----------------------- Caches / Globals -----------------------
+# MSE caches
+TARGET_NORM = None             # (1, C, H, W) float32 in [0,1] on device
+CACHED_NEGLOG_MSE_PREV = None  # (B,) on device
+
+# DreamSim caches
+DS_MODEL = None                # dreamsim model (on device, eval, frozen)
+TARGET_DS_EMB = None           # (1, D) on device (normalized)
+CACHED_DS_SIM_PREV = None      # (B,) on device
+
+# Book-keeping
 LAST_EPISODE_FOR_CACHE = -1
 
+
+# ----------------------- DreamSim loader -----------------------
+def load_dreamsim_model(device, dreamsim_type: Optional[str] = None):
+    """
+    Loads DreamSim (once per rank), returns the global model.
+    dreamsim_type: None (ensemble) or 'dino_vitb16' / 'openclip_vitb32' / 'clip_vitb32'
+    """
+    global DS_MODEL
+    if DS_MODEL is not None:
+        return DS_MODEL
+
+    from dreamsim import dreamsim  # import lazily so your env doesn't pay cost unless needed
+    cache_dir = os.environ.get("DREAMSIM_CACHE")
+    if dreamsim_type:
+        model, _preprocess = dreamsim(pretrained=True, device=device, dreamsim_type=dreamsim_type, cache_dir=cache_dir)
+    else:
+        model, _preprocess = dreamsim(pretrained=True, device=device, cache_dir=cache_dir)
+
+    # freeze + eval
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+    DS_MODEL = model
+    return DS_MODEL
+
+
+# ----------------------- Pure-tensor preprocess (GPU) -----------------------
+@torch.no_grad()
+def _to_bchw_01_from_bhwc(bhwc, device):
+    """
+    bhwc: (B, H, W, C) uint8 [0..255] or float [0..255]/[0..1], on any device
+    return: (B, C, H, W) float32 in [0,1] on target device
+    """
+    x = bhwc.to(device)
+    if x.dtype != torch.float32:
+        x = x.float()
+    # scale to [0,1] if it looks like 0..255
+    if x.max() > 1.5:
+        x = x / 255.0
+    # BHWC -> BCHW
+    x = x.permute(0, 3, 1, 2).contiguous()
+    # 1-ch grayscale -> RGB
+    if x.shape[1] == 1:
+        x = x.repeat(1, 3, 1, 1)
+    elif x.shape[1] != 3:
+        raise ValueError(f"Expected 1 or 3 channels, got {x.shape[1]}")
+    return x.clamp_(0, 1)
+
+
+@torch.no_grad()
+def _ds_preprocess_tensor(bchw_01):
+    """
+    Resize to 224x224 on GPU for DreamSim. DreamSim’s own preprocess
+    mainly resizes/normalizes images in [0,1]. We keep [0,1] and
+    do only the resize here to avoid CPU hops.
+    """
+    return F.interpolate(bchw_01, size=(224, 224), mode="bilinear", align_corners=False)
+
+
+# ----------------------- DreamSim embedding / distance (GPU) -----------------------
+@torch.no_grad()
+def _ds_embed_bhwc(bhwc, device):
+    """Embed a batch (B,H,W,C) via DreamSim, entirely on GPU."""
+    model = load_dreamsim_model(device)
+    x = _to_bchw_01_from_bhwc(bhwc, device)
+    x = _ds_preprocess_tensor(x)          # (B,3,224,224) on device
+    emb = model.embed(x)                  # (B, D), normalized
+    return emb
+
+
+@torch.no_grad()
+def _ds_distance_to_cached_target(curr_bhwc, device):
+    """
+    Fast path: use cached TARGET_DS_EMB (1,D).
+    Returns cosine distance: (B,), lower is more similar.
+    """
+    global TARGET_DS_EMB
+    assert TARGET_DS_EMB is not None, "TARGET_DS_EMB is None; call _ds_set_target_embed_once first."
+    x_emb = _ds_embed_bhwc(curr_bhwc, device)                      # (B, D)
+    # 1 - cosine_similarity((B,D),(1,D)) -> (B,)
+    return (1.0 - F.cosine_similarity(x_emb, TARGET_DS_EMB.expand_as(x_emb), dim=-1))
+
+
+@torch.no_grad()
+def _ds_set_target_embed_once(target_bhwc, device):
+    """Compute & cache target embedding once per episode. target_bhwc: (B,H,W,C), use sample 0."""
+    global TARGET_DS_EMB
+    if TARGET_DS_EMB is not None:
+        return
+    model = load_dreamsim_model(device)
+    t = _to_bchw_01_from_bhwc(target_bhwc[:1], device)  # (1,C,H,W)
+    t = _ds_preprocess_tensor(t)                        # (1,3,224,224)
+    TARGET_DS_EMB = model.embed(t)                      # (1,D), normalized
+
+
+# ----------------------- Reward function (GPU-only) -----------------------
+@torch.no_grad()
 def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
                      prev_prev_idx, prev_idx, current_idx, center,
                      edge_map=None, current_episode=None, current_step=None, segments_map=None):
     """
-    MSE-only reward (no dithering):
-      IR_mse = Δ( -log(MSE) ) vs previous step
-      GR_mse = -log(MSE)
-      total_raw = mean(IR_mse + GR_mse)
-      total_penalized = total_raw - penalty
-      total_scaled = total_penalized * reward_scale
+    DreamSim + MSE reward (no dithering), all on GPU and batched.
 
-    Logs (reward_plots/*): raw MSE, -log MSE, IR, GR, totals (w/o penalty, penalized, scaled), penalty.
-    Assumes canvases are (B,H,W,C) in [0,255]. No eps added to logs.
+    Conventions (maximize reward):
+      - MSE similarity: sim_mse = -log(MSE(curr, target))
+      - DreamSim similarity: sim_ds = -(distance(curr, target))
+      - IR := sim(curr) - sim(prev)
+      - GR := sim(curr)
+
+    ACTIVE total returned (scaled):  B = IR(MSE) + GR(DreamSim)
+
+    Inputs:
+      prev_canvas/current_canvas/target_canvas: (B,H,W,C) on *any* device, uint8 or float
     """
-    reward_scale       = float(config.get("reward_scale", 10))
-    same_nail_penalty  = float(config.get("same_nail_penalty", 0.05))
-    steps_per_ep       = int(config.get("max_strokes", 5000))
+    # ---- config ----
+    reward_scale      = float(config.get("reward_scale", 10.0))
+    same_nail_penalty = float(config.get("same_nail_penalty", 0.05))
+    steps_per_ep      = int(config.get("max_strokes", 5000))
+    dreamsim_type     = config.get("dreamsim_type", None)  # None => ensemble (already handled by loader)
 
-    global TARGET_NORM
-    global CACHED_NEGLOG_MSE_PREV, LAST_EPISODE_FOR_CACHE
+    # optional per-term scalers
+    ir_mse_scale = float(config.get("ir_mse_scale", 1.0))
+    gr_mse_scale = float(config.get("gr_mse_scale", 1.0))
+    ir_ds_scale  = float(config.get("ir_ds_scale", 1.0))
+    gr_ds_scale  = float(config.get("gr_ds_scale", 1.0))
 
-    with torch.no_grad():
-        ep = int(current_episode)
-        st = int(current_step)
-        if (LAST_EPISODE_FOR_CACHE != ep) or (st == 0):
-            CACHED_NEGLOG_MSE_PREV = None
-            LAST_EPISODE_FOR_CACHE = ep
+    global TARGET_NORM, CACHED_NEGLOG_MSE_PREV, DS_MODEL, TARGET_DS_EMB, CACHED_DS_SIM_PREV, LAST_EPISODE_FOR_CACHE
 
-        # ---- NCHW in [0,1] ----
-        curr_nchw = current_canvas.permute(0, 3, 1, 2).contiguous() / 255.0
-        if TARGET_NORM is None:
-            TARGET_NORM = target_canvas.permute(0, 3, 1, 2).contiguous() / 255.0
+    ep = int(current_episode)
+    st = int(current_step)
 
-        # ---- raw MSE per sample ----
-        mse_curr = F.mse_loss(curr_nchw, TARGET_NORM, reduction="none").flatten(1).mean(dim=1)  # (B,)
-        neglog_mse_curr = -torch.log(mse_curr)  # no eps
+    # ---- per-episode resets ----
+    if (LAST_EPISODE_FOR_CACHE != ep) or (st == 0):
+        CACHED_NEGLOG_MSE_PREV = None
+        CACHED_DS_SIM_PREV     = None
+        TARGET_NORM            = None
+        TARGET_DS_EMB          = None
+        LAST_EPISODE_FOR_CACHE = ep
 
-        # ---- IR & GR ----
-        if CACHED_NEGLOG_MSE_PREV is None:
-            ir_mse = torch.zeros_like(neglog_mse_curr)
-        else:
-            ir_mse = neglog_mse_curr - CACHED_NEGLOG_MSE_PREV
-        gr_mse = neglog_mse_curr
+    # ---- ensure DreamSim is loaded (once) ----
+    load_dreamsim_model(device, dreamsim_type=dreamsim_type)
 
-        # ---- totals ----
-        total_raw = (ir_mse + gr_mse).mean().item()
-        penalty = same_nail_penalty if (prev_idx == current_idx) else 0.0
-        total_penalized = total_raw - penalty
-        total_scaled = total_penalized * reward_scale
+    # ---- Prepare tensors for MSE (BCHW in [0,1]) on device ----
+    curr_bchw = _to_bchw_01_from_bhwc(current_canvas, device)            # (B,C,H,W)
+    if TARGET_NORM is None:
+        TARGET_NORM = _to_bchw_01_from_bhwc(target_canvas[:1], device)   # (1,C,H,W) (target is shared)
+    # broadcast TARGET_NORM to (B,C,H,W) without materializing (via expand)
+    target_bchw = TARGET_NORM.expand(curr_bchw.shape[0], -1, -1, -1)
 
-        # ---- update caches ----
-        CACHED_NEGLOG_MSE_PREV = neglog_mse_curr.detach()
+    # ---- raw MSE per sample ----
+    mse_curr = F.mse_loss(curr_bchw, target_bchw, reduction="none").flatten(1).mean(dim=1)  # (B,)
+    neglog_mse_curr = -torch.log(mse_curr)  # (B,)  (no eps, matches your convention)
 
-        # ---- logging ----
-        global_step = ep * steps_per_ep + st
-        wb_log({
-            "reward_plots/episode": ep,
-            "reward_plots/step_in_episode": st,
+    # ---- IR / GR for MSE ----
+    if CACHED_NEGLOG_MSE_PREV is None:
+        ir_mse_raw = torch.zeros_like(neglog_mse_curr, device=device)
+    else:
+        ir_mse_raw = neglog_mse_curr - CACHED_NEGLOG_MSE_PREV
+    gr_mse_raw = neglog_mse_curr
+    CACHED_NEGLOG_MSE_PREV = neglog_mse_curr.detach()
 
-            "reward_plots/mse_curr": mse_curr.mean().item(),
-            "reward_plots/neglog_mse_curr": neglog_mse_curr.mean().item(),
+    # ---- DreamSim target embed (once) + current distance -> similarity ----
+    _ds_set_target_embed_once(target_canvas, device)
+    ds_dist_curr = _ds_distance_to_cached_target(current_canvas, device)  # (B,), lower=better
+    ds_sim_curr  = -ds_dist_curr                                         # higher=better
 
-            "reward_plots/ir_mse": ir_mse.mean().item(),
-            "reward_plots/gr_mse": gr_mse.mean().item(),
+    if CACHED_DS_SIM_PREV is None:
+        ir_ds_raw = torch.zeros_like(ds_sim_curr, device=device)
+    else:
+        ir_ds_raw = ds_sim_curr - CACHED_DS_SIM_PREV
+    gr_ds_raw = ds_sim_curr
+    CACHED_DS_SIM_PREV = ds_sim_curr.detach()
+    
+    # ------- (Optional) independent per-term scaling before total -------
+    ir_mse  = ir_mse_scale * ir_mse_raw
+    gr_mse  = gr_mse_scale * gr_mse_raw
+    ir_ds   = ir_ds_scale  * ir_ds_raw
+    gr_ds   = gr_ds_scale  * gr_ds_raw
 
-            "reward_plots/total_reward(w/o penalty)": total_raw,
-            "reward_plots/total_reward_penalized": total_penalized,
-            "reward_plots/total_reward_scaled": total_scaled,
-            "reward_plots/penalty": penalty,
-        }, step=global_step)
+    # ------- Four totals (mean over batch, pre-penalty, pre-global-scale), currenlty *1.0 -------
+    TOTAL_A = (ir_mse + gr_mse).mean().item()
+    TOTAL_B = (ir_mse + gr_ds ).mean().item()   # <— ACTIVE (your choice)
+    TOTAL_C = (ir_ds  + gr_mse).mean().item()
+    TOTAL_D = (ir_ds  + gr_ds ).mean().item()
 
-    return total_scaled
+    # ------- Penalty -------
+    penalty = same_nail_penalty if (int(prev_idx) == int(current_idx)) else 0.0
+
+    # ------- Scaled outputs -------
+    totals_pre_scale = {
+        "A_irMSE+grMSE": TOTAL_A,
+        "B_irMSE+grDS" : TOTAL_B,
+        "C_irDS+grMSE" : TOTAL_C,
+        "D_irDS+grDS"  : TOTAL_D,
+    }
+    totals_penalized = {k: (v - penalty) for k, v in totals_pre_scale.items()}
+    totals_scaled    = {k: (v - penalty) * reward_scale for k, v in totals_pre_scale.items()}
+
+    # ------- Logging -------
+    global_step = ep * steps_per_ep + st
+    wb_log({
+        # bookkeeping
+        #"reward/episode": ep,
+        #"reward/step_in_episode": st,
+
+        # raw metrics (batch means)
+        "reward/mse_curr":          mse_curr.mean().item(),
+        #"reward/neglog_mse_curr":   neglog_mse_curr.mean().item(),
+        "reward/dreamsim_dist_curr":ds_dist_curr.mean().item(),
+        #"reward/dreamsim_sim_curr": ds_sim_curr.mean().item(),  # = -distance
+
+        # IR & GR (raw, unscaled)
+        "reward/ir_mse_raw": ir_mse_raw.mean().item(),
+        "reward/gr_mse_raw": gr_mse_raw.mean().item(), #neglog_mse_curr
+        "reward/ir_ds_raw":  ir_ds_raw.mean().item(),
+        "reward/gr_ds_raw":  gr_ds_raw.mean().item(),  #ds_sim_curr
+
+        # IR & GR after per-term scaling (still before global reward_scale) - currently 1.0
+        "reward/ir_mse": ir_mse.mean().item(),
+        "reward/gr_mse": gr_mse.mean().item(),
+        "reward/ir_ds":  ir_ds.mean().item(),
+        "reward/gr_ds":  gr_ds.mean().item(),
+
+        # combo totals 
+        # with just per term scales (1.0)
+        "reward/total_A_pre": totals_pre_scale["A_irMSE+grMSE"],
+        "reward/total_B_pre": totals_pre_scale["B_irMSE+grDS"],
+        "reward/total_C_pre": totals_pre_scale["C_irDS+grMSE"],
+        "reward/total_D_pre": totals_pre_scale["D_irDS+grDS"],
+
+        # after penalty
+        "reward/total_A_penalized": totals_penalized["A_irMSE+grMSE"],
+        "reward/total_B_penalized": totals_penalized["B_irMSE+grDS"],
+        "reward/total_C_penalized": totals_penalized["C_irDS+grMSE"],
+        "reward/total_D_penalized": totals_penalized["D_irDS+grDS"],
+
+        # after penalty (0.05) and reward scale (10)
+        "reward/total_A_scaled": totals_scaled["A_irMSE+grMSE"],
+        "reward/total_B_scaled": totals_scaled["B_irMSE+grDS"],
+        "reward/total_C_scaled": totals_scaled["C_irDS+grMSE"],
+        "reward/total_D_scaled": totals_scaled["D_irDS+grDS"],
+
+    }, step=global_step)
+
+    # ------- Return ACTIVE total (scaled) -------
+    return totals_scaled["B_irMSE+grDS"]
 
 
 def _lpips_model(device):
