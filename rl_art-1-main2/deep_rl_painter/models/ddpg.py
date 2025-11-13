@@ -235,9 +235,14 @@ class DDPGAgent:
         # more exploration in initial stages, more exploitation later on
         # dynamic exploration - decays    
         global_step = int(self.global_step)  # calculated above
-        #eps_start, eps_end, eps_decay_steps = 0.6, 0.05, 80_000
-        eps_start, eps_end, eps_decay_steps = 0.7, 0.10, 150_000
-        eps = eps_end + (eps_start - eps_end) * math.exp(-global_step / eps_decay_steps)
+        eps_start, eps_end, eps_decay_steps = 0.90, 0.20, 200_000
+        eps_warm = 50_000
+        if global_step < eps_warm:
+            eps = eps_start
+        else:
+            t = max(0, global_step - eps_warm)
+            eps = eps_end + (eps_start - eps_end) * math.exp(-t / eps_decay_steps)
+
         if p < eps:
             # exploration: pick a random nail index 
             action_idx = np.random.randint(0, self.config["nails"])
@@ -414,7 +419,7 @@ class DDPGAgent:
             # forward actor with augmented prev action
             nail_logits, _ = self.actor(canvas_resized, target_resized, prev_aug)
 
-            tau_loss = 2.0  # warmer ONLY for loss path
+            tau_loss = 3.0  # warmer ONLY for loss path
             a_soft   = F.gumbel_softmax(nail_logits, tau=tau_loss, hard=False)      # (B, N)
             action_xy_soft = a_soft @ self.nail_coords                              # (B, 2)
             a_soft_aug     = torch.cat([a_soft, action_xy_soft], dim=1)             # (B, N+2)
@@ -442,7 +447,7 @@ class DDPGAgent:
             # alpha = float(self.config.get("entropy_alpha", 0.15))
             # annealed alpha
             #alpha = max(0.12, 0.25 * (1.0 - shared_step / 1e5))
-            alpha = max(0.15, 0.25 * (1.0 - shared_step / 1.2e5))
+            alpha = float(self.config.get("entropy_alpha", 0.30))
             actor_loss = -(Q_norm.mean() + alpha * ent)
                            
         #computes gradients

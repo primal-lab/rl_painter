@@ -54,7 +54,7 @@ CACHED_DS_SIM_PREV = None      # (B,) on device
 
 # Book-keeping
 LAST_EPISODE_FOR_CACHE = -1
-
+EP_DS_START = None
 
 # ----------------------- DreamSim loader -----------------------
 def load_dreamsim_model(device, dreamsim_type: Optional[str] = None):
@@ -157,151 +157,111 @@ def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
                      prev_prev_idx, prev_idx, current_idx, center,
                      edge_map=None, current_episode=None, current_step=None, segments_map=None):
     """
-    DreamSim + MSE reward (no dithering), all on GPU and batched.
+    DreamSim + MSE reward (all on GPU, batched).
 
-    Conventions (maximize reward):
-      - MSE similarity: sim_mse = -log(MSE(curr, target))
-      - DreamSim similarity: sim_ds = -(distance(curr, target))
-      - IR := sim(curr) - sim(prev)
-      - GR := sim(curr)
+    Per-step reward (IR-only):
+        ir_mse_coef * IR[-log(MSE)] + ir_ds_coef * IR[-DreamSimDistance]
+    Terminal bonus (last step only):
+        gr_ds_terminal_coef * max(0, DreamSimDist_start - DreamSimDist_final)
 
-    ACTIVE total returned (scaled):  B = IR(MSE) + GR(DreamSim)
-
-    Inputs:
-      prev_canvas/current_canvas/target_canvas: (B,H,W,C) on *any* device, uint8 or float
+    Higher is better. No clipping.
     """
-    # ---- config ----
-    reward_scale      = float(config.get("reward_scale", 10.0))
+    # ---------- config ----------
     same_nail_penalty = float(config.get("same_nail_penalty", 0.05))
     steps_per_ep      = int(config.get("max_strokes", 5000))
-    dreamsim_type     = config.get("dreamsim_type", None)  # None => ensemble (already handled by loader)
+    dreamsim_type     = config.get("dreamsim_type", None)
 
-    # optional per-term scalers
-    ir_mse_scale = float(config.get("ir_mse_scale", 1.0))
-    gr_mse_scale = float(config.get("gr_mse_scale", 1.0))
-    ir_ds_scale  = float(config.get("ir_ds_scale", 1.0))
-    gr_ds_scale  = float(config.get("gr_ds_scale", 1.0))
+    # IR scalers (make signal large enough to matter)
+    ir_mse_coef       = float(config.get("ir_mse_coef", 1.5e4))   # boosts tiny ~3e-4 deltas → ~4–5 reward
+    ir_ds_coef        = float(config.get("ir_ds_coef",  2.0e2))   # DreamSim IR spikes (~1e-3) → ~0.2 reward
 
-    global TARGET_NORM, CACHED_NEGLOG_MSE_PREV, DS_MODEL, TARGET_DS_EMB, CACHED_DS_SIM_PREV, LAST_EPISODE_FOR_CACHE
+    # Terminal bonus scale (episode-level improvement)
+    gr_ds_term        = float(config.get("gr_ds_terminal_coef", 50.0))
+
+    global TARGET_NORM, CACHED_NEGLOG_MSE_PREV
+    global DS_MODEL, TARGET_DS_EMB, CACHED_DS_SIM_PREV
+    global LAST_EPISODE_FOR_CACHE, EP_DS_START
 
     ep = int(current_episode)
     st = int(current_step)
 
-    # ---- per-episode resets ----
+    # ---------- per-episode resets ----------
     if (LAST_EPISODE_FOR_CACHE != ep) or (st == 0):
         CACHED_NEGLOG_MSE_PREV = None
         CACHED_DS_SIM_PREV     = None
         TARGET_NORM            = None
         TARGET_DS_EMB          = None
+        EP_DS_START            = None
         LAST_EPISODE_FOR_CACHE = ep
 
-    # ---- ensure DreamSim is loaded (once) ----
+    # ---------- ensure DreamSim is loaded ----------
     load_dreamsim_model(device, dreamsim_type=dreamsim_type)
 
-    # ---- Prepare tensors for MSE (BCHW in [0,1]) on device ----
-    curr_bchw = _to_bchw_01_from_bhwc(current_canvas, device)            # (B,C,H,W)
+    # ---------- MSE path (BCHW in [0,1]) ----------
+    curr_bchw = _to_bchw_01_from_bhwc(current_canvas, device)             # (B,C,H,W)
     if TARGET_NORM is None:
-        TARGET_NORM = _to_bchw_01_from_bhwc(target_canvas[:1], device)   # (1,C,H,W) (target is shared)
-    # broadcast TARGET_NORM to (B,C,H,W) without materializing (via expand)
+        TARGET_NORM = _to_bchw_01_from_bhwc(target_canvas[:1], device)    # (1,C,H,W)
     target_bchw = TARGET_NORM.expand(curr_bchw.shape[0], -1, -1, -1)
 
-    # ---- raw MSE per sample ----
-    mse_curr = F.mse_loss(curr_bchw, target_bchw, reduction="none").flatten(1).mean(dim=1)  # (B,)
-    neglog_mse_curr = -torch.log(mse_curr)  # (B,)  (no eps, matches your convention)
+    mse_curr        = F.mse_loss(curr_bchw, target_bchw, reduction="none").flatten(1).mean(1)  # (B,)
+    neglog_mse_curr = -torch.log(mse_curr)                                                     # (B,)
 
-    # ---- IR / GR for MSE ----
     if CACHED_NEGLOG_MSE_PREV is None:
         ir_mse_raw = torch.zeros_like(neglog_mse_curr, device=device)
     else:
         ir_mse_raw = neglog_mse_curr - CACHED_NEGLOG_MSE_PREV
-    gr_mse_raw = neglog_mse_curr
     CACHED_NEGLOG_MSE_PREV = neglog_mse_curr.detach()
 
-    # ---- DreamSim target embed (once) + current distance -> similarity ----
+    # ---------- DreamSim path (cached target embedding) ----------
     _ds_set_target_embed_once(target_canvas, device)
-    ds_dist_curr = _ds_distance_to_cached_target(current_canvas, device)  # (B,), lower=better
-    ds_sim_curr  = -ds_dist_curr                                         # higher=better
+    ds_dist_curr = _ds_distance_to_cached_target(current_canvas, device)   # (B,) lower=better
+    ds_sim_curr  = -ds_dist_curr                                           # higher=better
 
     if CACHED_DS_SIM_PREV is None:
         ir_ds_raw = torch.zeros_like(ds_sim_curr, device=device)
     else:
         ir_ds_raw = ds_sim_curr - CACHED_DS_SIM_PREV
-    gr_ds_raw = ds_sim_curr
     CACHED_DS_SIM_PREV = ds_sim_curr.detach()
-    
-    # ------- (Optional) independent per-term scaling before total -------
-    ir_mse  = ir_mse_scale * ir_mse_raw
-    gr_mse  = gr_mse_scale * gr_mse_raw
-    ir_ds   = ir_ds_scale  * ir_ds_raw
-    gr_ds   = gr_ds_scale  * gr_ds_raw
 
-    # ------- Four totals (mean over batch, pre-penalty, pre-global-scale), currenlty *1.0 -------
-    TOTAL_A = (ir_mse + gr_mse).mean().item()
-    TOTAL_B = (ir_mse + gr_ds ).mean().item()   # <— ACTIVE (your choice)
-    TOTAL_C = (ir_ds  + gr_mse).mean().item()
-    TOTAL_D = (ir_ds  + gr_ds ).mean().item()
+    # Record episode start distance (mean over batch) on step 0
+    if st == 0:
+        EP_DS_START = ds_dist_curr.mean().item()
 
-    # ------- Penalty -------
+    # ---------- per-step reward (IR only) ----------
+    reward_step = (
+        ir_mse_coef * ir_mse_raw.mean().item()
+      + ir_ds_coef  * ir_ds_raw.mean().item()
+    )
+
+    # penalty for staying on the same nail
     penalty = same_nail_penalty if (int(prev_idx) == int(current_idx)) else 0.0
+    reward_step -= penalty
 
-    # ------- Scaled outputs -------
-    totals_pre_scale = {
-        "A_irMSE+grMSE": TOTAL_A,
-        "B_irMSE+grDS" : TOTAL_B,
-        "C_irDS+grMSE" : TOTAL_C,
-        "D_irDS+grDS"  : TOTAL_D,
-    }
-    totals_penalized = {k: (v - penalty) for k, v in totals_pre_scale.items()}
-    totals_scaled    = {k: (v - penalty) * reward_scale for k, v in totals_pre_scale.items()}
+    # ---------- terminal bonus (episode improvement in DreamSim distance) ----------
+    terminal_bonus = 0.0
+    if int(st) == (steps_per_ep - 1) and (EP_DS_START is not None):
+        ds_improve    = max(0.0, EP_DS_START - ds_dist_curr.mean().item())  # positive if final is closer
+        terminal_bonus = gr_ds_term * ds_improve
+        reward_step   += terminal_bonus
 
-    # ------- Logging -------
+    # ---------- logging ----------
     global_step = ep * steps_per_ep + st
     wb_log({
-        # bookkeeping
-        #"reward/episode": ep,
-        #"reward/step_in_episode": st,
-
-        # raw metrics (batch means)
-        "reward/mse_curr":          mse_curr.mean().item(),
-        #"reward/neglog_mse_curr":   neglog_mse_curr.mean().item(),
-        "reward/dreamsim_dist_curr":ds_dist_curr.mean().item(),
-        #"reward/dreamsim_sim_curr": ds_sim_curr.mean().item(),  # = -distance
-
-        # IR & GR (raw, unscaled)
-        "reward/ir_mse_raw": ir_mse_raw.mean().item(),
-        "reward/gr_mse_raw": gr_mse_raw.mean().item(), #neglog_mse_curr
-        "reward/ir_ds_raw":  ir_ds_raw.mean().item(),
-        "reward/gr_ds_raw":  gr_ds_raw.mean().item(),  #ds_sim_curr
-
-        # IR & GR after per-term scaling (still before global reward_scale) - currently 1.0
-        "reward/ir_mse": ir_mse.mean().item(),
-        "reward/gr_mse": gr_mse.mean().item(),
-        "reward/ir_ds":  ir_ds.mean().item(),
-        "reward/gr_ds":  gr_ds.mean().item(),
-
-        # combo totals 
-        # with just per term scales (1.0)
-        "reward/total_A_pre": totals_pre_scale["A_irMSE+grMSE"],
-        "reward/total_B_pre": totals_pre_scale["B_irMSE+grDS"],
-        "reward/total_C_pre": totals_pre_scale["C_irDS+grMSE"],
-        "reward/total_D_pre": totals_pre_scale["D_irDS+grDS"],
-
-        # after penalty
-        "reward/total_A_penalized": totals_penalized["A_irMSE+grMSE"],
-        "reward/total_B_penalized": totals_penalized["B_irMSE+grDS"],
-        "reward/total_C_penalized": totals_penalized["C_irDS+grMSE"],
-        "reward/total_D_penalized": totals_penalized["D_irDS+grDS"],
-
-        # after penalty (0.05) and reward scale (10)
-        "reward/total_A_scaled": totals_scaled["A_irMSE+grMSE"],
-        "reward/total_B_scaled": totals_scaled["B_irMSE+grDS"],
-        "reward/total_C_scaled": totals_scaled["C_irDS+grMSE"],
-        "reward/total_D_scaled": totals_scaled["D_irDS+grDS"],
-
+        "reward/mse_curr":               mse_curr.mean().item(),
+        "reward/dreamsim_dist_curr":     ds_dist_curr.mean().item(),
+        "reward/ir_mse_raw":             ir_mse_raw.mean().item(),
+        "reward/ir_ds_raw":              ir_ds_raw.mean().item(),
+        "reward/gr_ds_raw":              ds_sim_curr.mean().item(),   # = -distance
+        "reward/penalty":                penalty,
+        "reward/terminal_bonus":         terminal_bonus,
+        "reward/ds_start":               0.0 if EP_DS_START is None else EP_DS_START,
+        "reward/total_step":             reward_step,
+        "reward/ir_mse_coef":            ir_mse_coef,
+        "reward/ir_ds_coef":             ir_ds_coef,
+        "reward/gr_ds_terminal_coef":    gr_ds_term,
     }, step=global_step)
 
-    # ------- Return ACTIVE total (scaled) -------
-    return totals_scaled["B_irMSE+grDS"]
+    return reward_step
 
 
 def _lpips_model(device):
