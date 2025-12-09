@@ -58,7 +58,7 @@ def train(config):
         wandb.init(
             project="ddpg-painter",
             #name="(testing_gates)actor_(1target-ir+gr(mse))_resnet18(nolayer_frozen)_(512,1024,1024)_actorloss(hard=f)_opacity=0.1", 
-            name="run17", 
+            name="ppt(oldtarget_5000)_ds_gt", 
             config=config
         )
 

@@ -34,6 +34,8 @@ from torchvision.utils import save_image
 from torchvision.transforms.functional import to_pil_image
 from dreamsim import dreamsim
 from typing import Optional
+from pytorch_msssim import ms_ssim as ms_ssim_fn, ssim as ssim_fn
+
 
 # ----------------------- W&B helper -----------------------
 _IS_MAIN = int(os.environ.get("RANK", "0")) == 0
@@ -43,18 +45,15 @@ def wb_log(data: dict, step: Optional[int] = None):
         wandb.log(data, step=step)
 
 # ----------------------- Caches / Globals -----------------------
-# MSE caches
-TARGET_NORM = None             # (1, C, H, W) float32 in [0,1] on device
-CACHED_NEGLOG_MSE_PREV = None  # (B,) on device
 
 # DreamSim caches
-DS_MODEL = None                # dreamsim model (on device, eval, frozen)
-TARGET_DS_EMB = None           # (1, D) on device (normalized)
-CACHED_DS_SIM_PREV = None      # (B,) on device
+DS_MODEL       = None          # dreamsim model (on device, eval, frozen)
+TARGET_DS_EMB  = None          # (1, D) on device (normalized)
 
 # Book-keeping
 LAST_EPISODE_FOR_CACHE = -1
-EP_DS_START = None
+EP_DS_START            = None  # scalar: baseline DreamSim dist (d_bt) for this episode
+CACHED_DS_SCORE_PREV   = None  # scalar: GR_{t-1} for IR
 
 # ----------------------- DreamSim loader -----------------------
 def load_dreamsim_model(device, dreamsim_type: Optional[str] = None):
@@ -69,9 +68,14 @@ def load_dreamsim_model(device, dreamsim_type: Optional[str] = None):
     from dreamsim import dreamsim  # import lazily so your env doesn't pay cost unless needed
     cache_dir = os.environ.get("DREAMSIM_CACHE")
     if dreamsim_type:
-        model, _preprocess = dreamsim(pretrained=True, device=device, dreamsim_type=dreamsim_type, cache_dir=cache_dir)
+        model, _preprocess = dreamsim(
+            pretrained=True, device=device,
+            dreamsim_type=dreamsim_type, cache_dir=cache_dir
+        )
     else:
-        model, _preprocess = dreamsim(pretrained=True, device=device, cache_dir=cache_dir)
+        model, _preprocess = dreamsim(
+            pretrained=True, device=device, cache_dir=cache_dir
+        )
 
     # freeze + eval
     model.eval()
@@ -108,11 +112,15 @@ def _to_bchw_01_from_bhwc(bhwc, device):
 @torch.no_grad()
 def _ds_preprocess_tensor(bchw_01):
     """
-    Resize to 224x224 on GPU for DreamSim. DreamSim’s own preprocess
-    mainly resizes/normalizes images in [0,1]. We keep [0,1] and
-    do only the resize here to avoid CPU hops.
+    Resize to 224x224 on GPU for DreamSim.
+    Input is float32 in [0,1], (B,C,H,W).
     """
-    return F.interpolate(bchw_01, size=(224, 224), mode="bilinear", align_corners=False)
+    return F.interpolate(
+        bchw_01,
+        size=(224, 224),
+        mode="bilinear",
+        align_corners=False,
+    )
 
 
 # ----------------------- DreamSim embedding / distance (GPU) -----------------------
@@ -120,10 +128,25 @@ def _ds_preprocess_tensor(bchw_01):
 def _ds_embed_bhwc(bhwc, device):
     """Embed a batch (B,H,W,C) via DreamSim, entirely on GPU."""
     model = load_dreamsim_model(device)
-    x = _to_bchw_01_from_bhwc(bhwc, device)
-    x = _ds_preprocess_tensor(x)          # (B,3,224,224) on device
-    emb = model.embed(x)                  # (B, D), normalized
+    x = _to_bchw_01_from_bhwc(bhwc, device)  # (B,C,H,W) in [0,1]
+    x = _ds_preprocess_tensor(x)             # (B,3,224,224)
+    emb = model.embed(x)                     # (B, D), normalized
     return emb
+
+
+@torch.no_grad()
+def _ds_set_target_embed_once(target_bhwc, device):
+    """
+    Compute & cache target embedding once per episode.
+    target_bhwc: (B,H,W,C); we use sample 0 as the canonical target.
+    """
+    global TARGET_DS_EMB
+    if TARGET_DS_EMB is not None:
+        return
+    model = load_dreamsim_model(device)
+    t = _to_bchw_01_from_bhwc(target_bhwc[:1], device)  # (1,C,H,W)
+    t = _ds_preprocess_tensor(t)                        # (1,3,224,224)
+    TARGET_DS_EMB = model.embed(t)                      # (1,D), normalized
 
 
 @torch.no_grad()
@@ -134,143 +157,111 @@ def _ds_distance_to_cached_target(curr_bhwc, device):
     """
     global TARGET_DS_EMB
     assert TARGET_DS_EMB is not None, "TARGET_DS_EMB is None; call _ds_set_target_embed_once first."
-    x_emb = _ds_embed_bhwc(curr_bhwc, device)                      # (B, D)
+    x_emb = _ds_embed_bhwc(curr_bhwc, device)  # (B, D)
     # 1 - cosine_similarity((B,D),(1,D)) -> (B,)
-    return (1.0 - F.cosine_similarity(x_emb, TARGET_DS_EMB.expand_as(x_emb), dim=-1))
+    return 1.0 - F.cosine_similarity(
+        x_emb,
+        TARGET_DS_EMB.expand_as(x_emb),
+        dim=-1,
+    )
 
 
-@torch.no_grad()
-def _ds_set_target_embed_once(target_bhwc, device):
-    """Compute & cache target embedding once per episode. target_bhwc: (B,H,W,C), use sample 0."""
-    global TARGET_DS_EMB
-    if TARGET_DS_EMB is not None:
-        return
-    model = load_dreamsim_model(device)
-    t = _to_bchw_01_from_bhwc(target_bhwc[:1], device)  # (1,C,H,W)
-    t = _ds_preprocess_tensor(t)                        # (1,3,224,224)
-    TARGET_DS_EMB = model.embed(t)                      # (1,D), normalized
-
-
-# ----------------------- Reward function (GPU-only) -----------------------
+# ----------------------- Reward function (DreamSim-only) -----------------------
 @torch.no_grad()
 def calculate_reward(prev_canvas, current_canvas, target_canvas, device,
                      prev_prev_idx, prev_idx, current_idx, center,
                      edge_map=None, current_episode=None, current_step=None, segments_map=None):
     """
-    DreamSim + MSE reward (all on GPU, batched).
+    DreamSim-only reward.
 
-    Per-step reward (IR-only):
-        ir_mse_coef * IR[-log(MSE)] + ir_ds_coef * IR[-DreamSimDistance]
-    Terminal bonus (last step only):
-        gr_ds_terminal_coef * max(0, DreamSimDist_start - DreamSimDist_final)
+    Let:
+        dst_t = DreamSimDistance(S_t, T)        (lower = better)
+        d_bt  = DreamSimDistance(blank, T) ≈ dst_0
 
-    Higher is better. No clipping.
+    Define global score (per step):
+        GR_t = 1 - (dst_t / d_bt)
+
+    Intermediate reward:
+        IR_t = GR_t - GR_{t-1}
+
+    Final RL reward:
+        reward_t = IR_t + GR_t
+
+    (plus optional same-nail penalty).
     """
     # ---------- config ----------
     same_nail_penalty = float(config.get("same_nail_penalty", 0.05))
     steps_per_ep      = int(config.get("max_strokes", 5000))
     dreamsim_type     = config.get("dreamsim_type", None)
 
-    # IR scalers (make signal large enough to matter)
-    ir_mse_coef       = float(config.get("ir_mse_coef", 1.5e4))   # boosts tiny ~3e-4 deltas → ~4–5 reward
-    ir_ds_coef        = float(config.get("ir_ds_coef",  2.0e2))   # DreamSim IR spikes (~1e-3) → ~0.2 reward
-
-    # Terminal bonus scale (episode-level improvement)
-    gr_ds_term        = float(config.get("gr_ds_terminal_coef", 50.0))
-
-    global TARGET_NORM, CACHED_NEGLOG_MSE_PREV
-    global DS_MODEL, TARGET_DS_EMB, CACHED_DS_SIM_PREV
-    global LAST_EPISODE_FOR_CACHE, EP_DS_START
+    global DS_MODEL, TARGET_DS_EMB
+    global LAST_EPISODE_FOR_CACHE, EP_DS_START, CACHED_DS_SCORE_PREV
 
     ep = int(current_episode)
     st = int(current_step)
 
     # ---------- per-episode resets ----------
     if (LAST_EPISODE_FOR_CACHE != ep) or (st == 0):
-        CACHED_NEGLOG_MSE_PREV = None
-        CACHED_DS_SIM_PREV     = None
-        TARGET_NORM            = None
-        TARGET_DS_EMB          = None
-        EP_DS_START            = None
+        TARGET_DS_EMB        = None
+        EP_DS_START          = None
+        CACHED_DS_SCORE_PREV = None
         LAST_EPISODE_FOR_CACHE = ep
 
-    # ---------- ensure DreamSim is loaded ----------
+    # ---------- ensure DreamSim & target embedding ----------
     load_dreamsim_model(device, dreamsim_type=dreamsim_type)
-
-    # ---------- MSE path (BCHW in [0,1]) ----------
-    curr_bchw = _to_bchw_01_from_bhwc(current_canvas, device)             # (B,C,H,W)
-    if TARGET_NORM is None:
-        TARGET_NORM = _to_bchw_01_from_bhwc(target_canvas[:1], device)    # (1,C,H,W)
-    target_bchw = TARGET_NORM.expand(curr_bchw.shape[0], -1, -1, -1)
-
-    mse_curr        = F.mse_loss(curr_bchw, target_bchw, reduction="none").flatten(1).mean(1)  # (B,)
-    neglog_mse_curr = -torch.log(mse_curr)                                                     # (B,)
-
-    if CACHED_NEGLOG_MSE_PREV is None:
-        ir_mse_raw = torch.zeros_like(neglog_mse_curr, device=device)
-    else:
-        ir_mse_raw = neglog_mse_curr - CACHED_NEGLOG_MSE_PREV
-    CACHED_NEGLOG_MSE_PREV = neglog_mse_curr.detach()
-
-    # ---------- DreamSim path (cached target embedding) ----------
     _ds_set_target_embed_once(target_canvas, device)
-    ds_dist_curr = _ds_distance_to_cached_target(current_canvas, device)   # (B,) lower=better
-    ds_sim_curr  = -ds_dist_curr                                           # higher=better
 
-    if CACHED_DS_SIM_PREV is None:
-        ir_ds_raw = torch.zeros_like(ds_sim_curr, device=device)
+    # ---------- DreamSim distance for current canvas ----------
+    ds_dist_curr = _ds_distance_to_cached_target(current_canvas, device)  # (B,), lower = better
+    dst_mean = ds_dist_curr.mean().item()
+
+    # ---------- baseline d_bt: distance at (approx) blank canvas ----------
+    if EP_DS_START is None:
+        EP_DS_START = dst_mean  # distance at first step
+
+    d_bt = max(EP_DS_START, 1e-6)
+
+    # ---------- global score (GR) ----------
+    # GR_t = 1 - (dst_t / d_bt)
+    gr_t = 1.0 - (dst_mean / d_bt)
+
+    # ---------- intermediate reward (IR) ----------
+    if CACHED_DS_SCORE_PREV is None:
+        ir_t = 0.0
     else:
-        ir_ds_raw = ds_sim_curr - CACHED_DS_SIM_PREV
-    CACHED_DS_SIM_PREV = ds_sim_curr.detach()
+        ir_t = gr_t - CACHED_DS_SCORE_PREV
 
-    # Record episode start distance (mean over batch) on step 0
-    if st == 0:
-        EP_DS_START = ds_dist_curr.mean().item()
+    # cache for next step
+    CACHED_DS_SCORE_PREV = gr_t
 
-    # ---------- per-step reward (IR only) ----------
-    reward_step = (
-        ir_mse_coef * ir_mse_raw.mean().item()
-      + ir_ds_coef  * ir_ds_raw.mean().item()
-    )
+    # ---------- total per-step reward ----------
+    total_step = gr_t + ir_t  # reward = IR + GR
 
     # penalty for staying on the same nail
     penalty = same_nail_penalty if (int(prev_idx) == int(current_idx)) else 0.0
-    reward_step -= penalty
-
-    # ---------- terminal bonus (episode improvement in DreamSim distance) ----------
-    terminal_bonus = 0.0
-    if int(st) == (steps_per_ep - 1) and (EP_DS_START is not None):
-        ds_improve    = max(0.0, EP_DS_START - ds_dist_curr.mean().item())  # positive if final is closer
-        terminal_bonus = gr_ds_term * ds_improve
-        reward_step   += terminal_bonus
+    reward_step = total_step - penalty
 
     # ---------- logging ----------
     global_step = ep * steps_per_ep + st
+    ratio = dst_mean / d_bt  # dst/d_bt
+
     wb_log({
-        "reward/mse_curr":               mse_curr.mean().item(),
-        "reward/dreamsim_dist_curr":     ds_dist_curr.mean().item(),
-        "reward/ir_mse_raw":             ir_mse_raw.mean().item(),
-        "reward/ir_ds_raw":              ir_ds_raw.mean().item(),
-        "reward/gr_ds_raw":              ds_sim_curr.mean().item(),   # = -distance
-        "reward/penalty":                penalty,
-        "reward/terminal_bonus":         terminal_bonus,
-        "reward/ds_start":               0.0 if EP_DS_START is None else EP_DS_START,
-        "reward/total_step":             reward_step,
-        "reward/ir_mse_coef":            ir_mse_coef,
-        "reward/ir_ds_coef":             ir_ds_coef,
-        "reward/gr_ds_terminal_coef":    gr_ds_term,
+        # raw DreamSim diagnostics
+        "reward/dreamsim_dst":                dst_mean,     # dst_t
+        "reward/dreamsim_dbt":                d_bt,         # d_bt
+        "reward/dreamsim_ratio_dst_over_dbt": ratio,        # dst_t / d_bt
+
+        # IR / GR / total (per step)
+        "reward/dreamsim_score_gr":           gr_t,         # GR_t
+        "reward/dreamsim_score_ir":           ir_t,         # IR_t
+        "reward/dreamsim_score_total":        total_step,   # GR_t + IR_t
+
+        # penalties and final scalar
+        "reward/penalty":                     penalty,
+        "reward/total_step":                  reward_step,
     }, step=global_step)
 
     return reward_step
-
-
-def _lpips_model(device):
-    global LPIPS_MODEL
-    if LPIPS_MODEL is None or next(LPIPS_MODEL.parameters()).device != torch.device(device):
-        LPIPS_MODEL = lpips.LPIPS(net='alex').to(device).eval() #'vgg' or 'squeeze', alex is default & fast
-        for p in LPIPS_MODEL.parameters():
-            p.requires_grad_(False)
-    return LPIPS_MODEL   
 
 #def segments_reward(start, end, segments_map):
 def segments_reward(start, end, target_canvas):
